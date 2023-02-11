@@ -39,7 +39,7 @@ SOCKET_LIST FilterAndOrderSocketsByBytesIn(SOCKET_LIST& lstSocks)
         {
             if (sockInfo.State == TCPSTATE::TCPSTATE_SYN_RCVD || sockInfo.State == TCPSTATE::TCPSTATE_ESTABLISHED)
             {
-                SOCKET_BYTESIN sockBytesIn;
+                SOCKET_BYTESIN sockBytesIn = { 0 };
                 sockBytesIn.sock = hSock;
                 sockBytesIn.bytes_in = sockInfo.BytesIn;
                 lstSocketsBytesIn.push_back(sockBytesIn);
@@ -169,7 +169,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                             // No error so far
                             // Start thread for NtQueryObject call
                             g_CurrentIndex = 0;
-                            THREAD_PARAMS ThreadParams;
+                            THREAD_PARAMS ThreadParams = { 0 };
                             ThreadParams.pSysHandleInformation = pSysHandleInformation;
                             ThreadParams.hStartEvent = ::CreateEvent(0, TRUE, FALSE, 0);
                             ThreadParams.hFinishedEvent = ::CreateEvent(0, TRUE, FALSE, 0);
@@ -238,6 +238,7 @@ bool IsSocketOverlapped(SOCKET hSock)
             HANDLE hNtEvent = NULL;
             int ntStatus = -1;
             SOCKET_CONTEXT contextData;
+            memset(&contextData, 0, sizeof(SOCKET_CONTEXT));
             ntStatus = NtCreateEvent(&hNtEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, false);
             if (NT_SUCCESS(ntStatus) && hNtEvent != NULL && hNtEvent != INVALID_HANDLE_VALUE)
             {
@@ -275,8 +276,8 @@ bool IsSocketInherited(SOCKET hSock, DWORD dwProcessId)
         for(auto it = lstParentSocks.begin(); it != lstParentSocks.end(); ++it)
         {
             SOCKET hParentSock = *it;
-            SOCKADDR_IN sockaddrTargetProcess;
-            SOCKADDR_IN sockaddrParentProcess;
+            SOCKADDR_IN sockaddrTargetProcess = { 0 };
+            SOCKADDR_IN sockaddrParentProcess = { 0 };
             int iSockAddrTargetProcessLen = sizeof(sockaddrTargetProcess), iSockAddrParentProcessLen = sizeof(sockaddrParentProcess);
             if (
                 (getpeername(hSock, (sockaddr*)&sockaddrTargetProcess, &iSockAddrTargetProcessLen) == 0) &&
