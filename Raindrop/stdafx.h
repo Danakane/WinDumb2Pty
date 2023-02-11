@@ -1,6 +1,7 @@
 #ifndef _STDAFX_H_
 #define _STDAFX_H_
 
+#define OUT
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>

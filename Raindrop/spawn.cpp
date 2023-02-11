@@ -73,12 +73,12 @@ bool EnableVirtualTerminalSequenceProcessing()
     return bRes;
 }
 
-HRESULT CreatePseudoConsoleWithPipes(HPCON* phPseudoConsole, HANDLE hConPtyInputPipeRead, HANDLE hConPtyOutputPipeWrite, UINT uiRows, UINT uiCols)
+HRESULT CreatePseudoConsoleWithPipes(HANDLE hConPtyInputPipeRead, HANDLE hConPtyOutputPipeWrite, UINT uiRows, UINT uiCols, OUT HPCON* phPseudoConsole)
 {
     HRESULT hRes = E_FAIL;
     if (EnableVirtualTerminalSequenceProcessing())
     {
-        COORD consoleCoord;
+        COORD consoleCoord = { 0 };
         consoleCoord.X = (short)uiCols;
         consoleCoord.Y = (short)uiRows;
         hRes = CreatePseudoConsole(consoleCoord, hConPtyInputPipeRead, hConPtyOutputPipeWrite, 0, phPseudoConsole);
@@ -86,49 +86,62 @@ HRESULT CreatePseudoConsoleWithPipes(HPCON* phPseudoConsole, HANDLE hConPtyInput
     return hRes;
 }
 
-STARTUPINFOEX ConfigureProcessThread(HPCON* phPseudoConsole, IntPtr attributes)
+HRESULT ConfigureProcessThread(HPCON* phPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEX* pStartupInfo)
 {
-    IntPtr lpSize = IntPtr.Zero;
-    bool success = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize);
-    if (success || lpSize == IntPtr.Zero)
+    HRESULT hRes = E_FAIL;
+    SIZE_T pSize = NULL;
+    BOOL bSuccess = InitializeProcThreadAttributeList(NULL, 1, 0, &pSize);
+    if (pSize != NULL)
     {
-        throw new ConPtyShellException("Could not calculate the number of bytes for the attribute list. " + Marshal.GetLastWin32Error());
+        pStartupInfo->StartupInfo.cb = sizeof(STARTUPINFOEX);
+        pStartupInfo->lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(
+            GetProcessHeap(),
+            0,
+            pSize
+        );
+        if (InitializeProcThreadAttributeList(pStartupInfo->lpAttributeList, 1, 0, &pSize) == TRUE)
+        {
+            if (UpdateProcThreadAttribute(pStartupInfo->lpAttributeList, 0, pAttributes, phPseudoConsole, sizeof(DWORD), NULL, NULL) == TRUE)
+            {
+                hRes = S_OK;
+            }
+            else
+            {
+                cerr << "Could not set pseudoconsole thread attribute. " << GetLastError() << endl;
+            }
+        }
+        else
+        {
+            cerr << _T("Could not set up attribute list. ") << GetLastError() << endl;
+        }
     }
-    STARTUPINFOEX startupInfo = new STARTUPINFOEX();
-    startupInfo.StartupInfo.cb = Marshal.SizeOf(startupInfo);
-    startupInfo.lpAttributeList = Marshal.AllocHGlobal(lpSize);
-    success = InitializeProcThreadAttributeList(startupInfo.lpAttributeList, 1, 0, ref lpSize);
-    if (!success)
-    {
-        throw new ConPtyShellException("Could not set up attribute list. " + Marshal.GetLastWin32Error());
-    }
-    success = UpdateProcThreadAttribute(startupInfo.lpAttributeList, 0, attributes, phPseudoConsole, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero);
-    if (!success)
-    {
-        throw new ConPtyShellException("Could not set pseudoconsole thread attribute. " + Marshal.GetLastWin32Error());
-    }
-    return startupInfo;
+    
+    return hRes;
 }
 
-PROCESS_INFORMATION RunProcess(ref STARTUPINFOEX sInfoEx, string commandLine)
+HRESULT RunProcess(STARTUPINFOEX& startupInfo, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
 {
-    PROCESS_INFORMATION pInfo = new PROCESS_INFORMATION();
-    SECURITY_ATTRIBUTES pSec = new SECURITY_ATTRIBUTES();
-    int securityAttributeSize = Marshal.SizeOf(pSec);
-    pSec.nLength = securityAttributeSize;
-    SECURITY_ATTRIBUTES tSec = new SECURITY_ATTRIBUTES();
-    tSec.nLength = securityAttributeSize;
-    bool success = CreateProcessEx(null, commandLine, ref pSec, ref tSec, false, EXTENDED_STARTUPINFO_PRESENT, IntPtr.Zero, null, ref sInfoEx, out pInfo);
-    if (!success)
-    {
-        throw new ConPtyShellException("Could not create process. " + Marshal.GetLastWin32Error());
-    }
-    return pInfo;
+    HRESULT hRes = E_FAIL;
+    SECURITY_ATTRIBUTES processSec = { 0 };
+    int iSecurityAttributeSize = sizeof(processSec);
+    processSec.nLength = iSecurityAttributeSize;
+    SECURITY_ATTRIBUTES secAttributes = { 0 };
+    secAttributes.nLength = iSecurityAttributeSize;
+    if (CreateProcess(NULL, csCommandLine.GetBuffer(), &processSec, &secAttributes, false,
+        EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, (LPSTARTUPINFO)&startupInfo, pProcessInfo))
+        hRes = S_OK;
+    else
+        cerr << _T("Could not create process. ") <<  GetLastError() << endl;
+    return hRes;
 }
 
-PROCESS_INFORMATION CreateChildProcessWithPseudoConsole(IntPtr handlePseudoConsole, string commandLine)
+HRESULT CreateChildProcessWithPseudoConsole(HPCON* phPseudoConsole, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
 {
-    STARTUPINFOEX startupInfo = ConfigureProcessThread(handlePseudoConsole, (IntPtr)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE);
-    PROCESS_INFORMATION processInfo = RunProcess(ref startupInfo, commandLine);
-    return processInfo;
+    STARTUPINFOEX startupInfo;
+    HRESULT hRes = ConfigureProcessThread(phPseudoConsole, (DWORD_PTR)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, &startupInfo);
+    if (SUCCEEDED(hRes))
+    {
+        hRes = RunProcess(startupInfo, csCommandLine, pProcessInfo);
+    }
+    return hRes;
 }
