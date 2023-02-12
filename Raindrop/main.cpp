@@ -19,6 +19,7 @@ int main()
 {
     int iRes = -1;
     UnHookDll();
+    Sleep(15000);
     iRes = SUCCEEDED(SpawnPty(64, 236, _T("cmd.exe")));
     return iRes;
 }

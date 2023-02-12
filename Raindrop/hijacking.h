@@ -3,6 +3,7 @@
 
 #include "stdafx.h"
 
+typedef list<HANDLE> HANDLE_LIST;
 typedef list<SOCKET> SOCKET_LIST;
 
 typedef LONG NTSTATUS;
@@ -26,6 +27,7 @@ typedef struct _UNICODE_STRING {
 
 typedef enum _OBJECT_INFORMATION_CLASS {
     ObjectBasicInformation = 0,
+    ObjectNameInformation = 1,
     ObjectTypeInformation = 2
 } OBJECT_INFORMATION_CLASS;
 
@@ -57,6 +59,12 @@ typedef struct __PUBLIC_OBJECT_TYPE_INFORMATION {
 
 } PUBLIC_OBJECT_TYPE_INFORMATION, * PPUBLIC_OBJECT_TYPE_INFORMATION;
 
+typedef struct __PUBLIC_OBJECT_NAME_INFORMATION {
+
+    UNICODE_STRING Name;
+
+} PUBLIC_OBJECT_NAME_INFORMATION, * PPUBLIC_OBJECT_NAME_INFORMATION;
+
 typedef NTSTATUS(WINAPI* NtQuerySystemInformationPtr)
 (IN	SYSTEM_INFORMATION_CLASS SystemInformationClass,
     OUT	PVOID					 SystemInformation,
@@ -74,8 +82,7 @@ typedef NTSTATUS(NTAPI* NtQueryObjectPtr)(
 struct THREAD_PARAMS
 {
     PSYSTEM_HANDLE_INFORMATION pSysHandleInformation;
-    LPTSTR lpPath;
-    int nFileType;
+    DWORD dwProcessId;
     HANDLE hStartEvent;
     HANDLE hFinishedEvent;
     bool bStatus;
@@ -93,7 +100,7 @@ enum SOCKET_STATE
     SocketBound = 1,
     SocketBoundUdp = 2,
     SocketConnected = 3,
-    SocketClosed = 3
+    SocketClosed = 4
 };
 
 enum AFD_GROUP_TYPE
@@ -207,11 +214,9 @@ typedef NTSTATUS(NTAPI* NtDeviceIoControlFilePtr)(
 );
 
 
-bool GetSocketTcpInfo(SOCKET hSock, TCP_INFO_v0* tcpInfoOut);
-
 bool IsSocketHandle(HANDLE hHandle);
 
-bool GetSocketTcpInfo(SOCKET hSock, TCP_INFO_v0* tcpInfoOut);
+bool GetSocketTcpInfo(SOCKET hSock, TCP_INFO_v0** tcpInfoOut);
 
 SOCKET_LIST FilterAndOrderSocketsByBytesIn(SOCKET_LIST& lstSocks);
 
@@ -221,11 +226,17 @@ bool IsSocketOverlapped(SOCKET sock);
 
 bool IsSocketInherited(SOCKET hSock, DWORD dwProcessId);
 
+SOCKET DuplicateSocketFromHandle(HANDLE hHandle);
+
+SOCKET_LIST DuplicateSocketsFromHandles(HANDLE_LIST& lstHandles);
+
+DWORD WINAPI ThreadProc(LPVOID lParams);
+
 SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket);
 
 bool SetSocketBlockingMode(SOCKET hSock, int iMode);
 
-int InitWSAThread();
+bool InitWSAThread();
 
 void ShutdownWSAThread();
 

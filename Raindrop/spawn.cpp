@@ -97,7 +97,7 @@ HRESULT CreatePseudoConsoleWithPipes(HANDLE hConPtyInputPipeRead, HANDLE hConPty
     return hRes;
 }
 
-HRESULT ConfigureProcessThread(HPCON* phPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEX* pStartupInfo)
+HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEX* pStartupInfo)
 {
     HRESULT hRes = E_FAIL;
     SIZE_T pSize = NULL;
@@ -112,13 +112,14 @@ HRESULT ConfigureProcessThread(HPCON* phPseudoConsole, DWORD_PTR pAttributes, OU
         );
         if (InitializeProcThreadAttributeList(pStartupInfo->lpAttributeList, 1, 0, &pSize) == TRUE)
         {
-            if (UpdateProcThreadAttribute(pStartupInfo->lpAttributeList, 0, pAttributes, phPseudoConsole, sizeof(DWORD), NULL, NULL) == TRUE)
+            if (UpdateProcThreadAttribute(pStartupInfo->lpAttributeList, 0, pAttributes, hPseudoConsole, sizeof(hPseudoConsole), NULL, NULL) == TRUE)
             {
                 hRes = S_OK;
             }
             else
             {
-                cerr << "Could not set pseudoconsole thread attribute. " << GetLastError() << endl;
+                HeapFree(GetProcessHeap(), 0, pStartupInfo->lpAttributeList);
+                cerr << "Could not set pseudoconsole thread attribute." << endl;
             }
         }
         else
@@ -138,18 +139,27 @@ HRESULT RunProcess(STARTUPINFOEX& startupInfo, CString csCommandLine, OUT PROCES
     processSec.nLength = iSecurityAttributeSize;
     SECURITY_ATTRIBUTES secAttributes = { 0 };
     secAttributes.nLength = iSecurityAttributeSize;
-    if (CreateProcess(NULL, csCommandLine.GetBuffer(), &processSec, &secAttributes, false,
-        EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, (LPSTARTUPINFO)&startupInfo, pProcessInfo))
-        hRes = S_OK;
-    else
-        cerr << _T("Could not create process. ") <<  GetLastError() << endl;
+    const size_t charsRequired = csCommandLine.GetLength() + 1; // +1 null terminator
+    TCHAR* tcsCmdLineMutable = (TCHAR*)HeapAlloc(GetProcessHeap(), 0, sizeof(TCHAR) * charsRequired);
+
+    if (tcsCmdLineMutable)
+    {
+        _tcsncpy_s(tcsCmdLineMutable, charsRequired, csCommandLine.GetBuffer(), csCommandLine.GetLength());
+
+        if (CreateProcess(NULL, tcsCmdLineMutable, &processSec, &secAttributes, FALSE,
+            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startupInfo.StartupInfo, pProcessInfo))
+            hRes = S_OK;
+        else
+            cerr << _T("Could not create process. ") << GetLastError() << endl;
+        HeapFree(GetProcessHeap(), 0, tcsCmdLineMutable);
+    }
     return hRes;
 }
 
-HRESULT CreateChildProcessWithPseudoConsole(HPCON* phPseudoConsole, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
+HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
 {
-    STARTUPINFOEX startupInfo;
-    HRESULT hRes = ConfigureProcessThread(phPseudoConsole, (DWORD_PTR)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, &startupInfo);
+    STARTUPINFOEX startupInfo = { 0 };
+    HRESULT hRes = ConfigureProcessThread(hPseudoConsole, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, &startupInfo);
     if (SUCCEEDED(hRes))
     {
         hRes = RunProcess(startupInfo, csCommandLine, pProcessInfo);
@@ -284,9 +294,8 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                 HANDLE hOldStdOut = NULL;
                 HANDLE hOldStdErr = NULL;
                 InitConsole(hOldStdIn, hOldStdOut, hOldStdErr);
-                if (InitWSAThread() == 0)
+                if (InitWSAThread())
                 {
-                    HANDLE hProcess = GetCurrentProcess();
                     DWORD dwProcessId = GetCurrentProcessId();
                     DWORD dwParentProcessId = GetParentProcessId();
                     DWORD dwGrandParentProcessId = 0;
@@ -348,7 +357,7 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                         {
                             PROCESS_INFORMATION childProcessInfo;
                             memset(&childProcessInfo, 0, sizeof(PROCESS_INFORMATION));
-                            if (SUCCEEDED(CreateChildProcessWithPseudoConsole(&hPseudoConsole, csCommandLine, &childProcessInfo)))
+                            if (SUCCEEDED(CreateChildProcessWithPseudoConsole(hPseudoConsole, csCommandLine, &childProcessInfo)))
                             {
                                 // Note: We can close the handles to the PTY-end of the pipes here
                                 // because the handles are dup'ed into the ConHost and will be released
@@ -453,7 +462,6 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                                 }
                                 CloseHandle(childProcessInfo.hThread);
                                 CloseHandle(childProcessInfo.hProcess);
-                                ShutdownWSAThread();
                                 cout << _T("ConPtyShell kindly exited.") << endl;
                             }
                             if (hPseudoConsole != NULL) ClosePseudoConsole(hPseudoConsole);

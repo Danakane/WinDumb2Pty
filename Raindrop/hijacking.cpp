@@ -16,7 +16,24 @@ bool IsSocketHandle(HANDLE hHandle)
             PPUBLIC_OBJECT_TYPE_INFORMATION TypeInfo = (PPUBLIC_OBJECT_TYPE_INFORMATION)&buffer[0];
             ULONG InSize = OutSize;
             NtStatus = NtQueryObject(hHandle, ObjectTypeInformation, TypeInfo, InSize, &OutSize);
-            bRes = (0 == wcscmp(_T("\\Device\\Afd"), CString(TypeInfo->TypeName.Buffer, TypeInfo->TypeName.Length).GetBuffer()));
+            if (NT_SUCCESS(NtStatus))
+            {
+                if (0 == wcscmp(_T("File"), CString(TypeInfo->TypeName.Buffer, TypeInfo->TypeName.Length).GetBuffer()))
+                {
+                    NtStatus = NtQueryObject(hHandle, ObjectNameInformation, NULL, 0, &OutSize);
+                    buffer = vector<BYTE>(OutSize);
+                    PPUBLIC_OBJECT_NAME_INFORMATION NameInfo = (PPUBLIC_OBJECT_NAME_INFORMATION)&buffer[0];
+                    InSize = OutSize;
+                    NtStatus = NtQueryObject(hHandle, ObjectNameInformation, NameInfo, InSize, &OutSize);
+                    if (NT_SUCCESS(NtStatus))
+                    {
+                        if (0 == wcscmp(_T("\\Device\\Afd"), NameInfo->Name.Buffer))
+                        {
+                            bRes = true;
+                        }
+                    }
+                }
+            }
         }
         FreeLibrary(hMod);
     }
@@ -31,22 +48,29 @@ SOCKET_LIST FilterAndOrderSocketsByBytesIn(SOCKET_LIST& lstSocks)
     for(auto it = lstSocks.begin(); it != lstSocks.end(); ++it)
     {
         SOCKET hSock = *it;
-        TCP_INFO_v0 sockInfo;
+        TCP_INFO_v0* sockInfo = NULL;
         if (!GetSocketTcpInfo(*it, &sockInfo))
         {
-            closesocket(hSock);
+            try
+            {
+                closesocket(hSock);
+            }
+            catch (const std::system_error& e) 
+            {
+            }
         }
         else
         {
-            if (sockInfo.State == TCPSTATE::TCPSTATE_SYN_RCVD || sockInfo.State == TCPSTATE::TCPSTATE_ESTABLISHED)
+            if (sockInfo->State == TCPSTATE::TCPSTATE_SYN_RCVD || sockInfo->State == TCPSTATE::TCPSTATE_ESTABLISHED)
             {
                 SOCKET_BYTESIN sockBytesIn = { 0 };
                 sockBytesIn.sock = hSock;
-                sockBytesIn.bytes_in = sockInfo.BytesIn;
+                sockBytesIn.bytes_in = sockInfo->BytesIn;
                 lstSocketsBytesIn.push_back(sockBytesIn);
             }
             else
                 closesocket(hSock);
+            delete sockInfo;
         }
         
     }
@@ -60,61 +84,98 @@ SOCKET_LIST FilterAndOrderSocketsByBytesIn(SOCKET_LIST& lstSocks)
         for (auto it = lstSocketsBytesIn.begin(); it != lstSocketsBytesIn.end(); ++it)
         {
             lstSocketsOut.push_back(it->sock);
-            // Console.WriteLine("debug: Socket handle 0x" + sockBytesIn.handle.ToString("X4") + " total bytes received: " + sockBytesIn.BytesIn.ToString());
         }
     }
     
     return lstSocketsOut;
 }
 
-bool GetSocketTcpInfo(SOCKET hSock, TCP_INFO_v0* tcpInfoOut)
+bool GetSocketTcpInfo(SOCKET hSock, TCP_INFO_v0** tcpInfoOut)
 {
-    tcpInfoOut = NULL;
-    int result = -1;
+    ASSERT(tcpInfoOut != NULL);
+    int iRes = -1;
     DWORD tcpInfoVersion = 0;
     DWORD bytesReturned = 0;
     DWORD tcpInfoSize = sizeof(TCP_INFO_v0);
-    BYTE *pTcpInfo = new BYTE[tcpInfoSize];
-    result = WSAIoctl(hSock, SIO_TCP_INFO, &tcpInfoVersion, sizeof(tcpInfoVersion), pTcpInfo, tcpInfoSize, &bytesReturned, NULL, NULL);
-    if (result == 0)
+    TCP_INFO_v0* pTcpInfo = new TCP_INFO_v0;
+    iRes = WSAIoctl(hSock, SIO_TCP_INFO, &tcpInfoVersion, sizeof(tcpInfoVersion), pTcpInfo, tcpInfoSize, &bytesReturned, NULL, NULL);
+    if (iRes == 0)
     {
-        tcpInfoOut = (TCP_INFO_v0*)pTcpInfo;
+        *tcpInfoOut = (TCP_INFO_v0*)pTcpInfo;
     }
-    return result == 0;
+    return iRes == 0;
 }
+
+SOCKET DuplicateSocketFromHandle(HANDLE hHandle)
+{
+    SOCKET hSock = NULL;
+    SOCKET hDuplicatedSocket = NULL;
+    WSAPROTOCOL_INFO wsaProtocolInfo;
+    memset(&wsaProtocolInfo, 0, sizeof(WSAPROTOCOL_INFO));
+    int status = WSADuplicateSocket((SOCKET)hHandle, GetCurrentProcessId(), &wsaProtocolInfo);
+    if (status == 0)
+    {
+        // we need an overlapped socket for the conpty process but we don't need to specify the WSA_FLAG_OVERLAPPED flag here because it will be ignored (and automatically set) by WSASocket() function if we set the WSAPROTOCOL_INFO structure and if the original socket has been created with the overlapped flag.
+        hDuplicatedSocket = WSASocket(wsaProtocolInfo.iAddressFamily, wsaProtocolInfo.iSocketType, wsaProtocolInfo.iProtocol, &wsaProtocolInfo, 0, 0);
+        if (hDuplicatedSocket != INVALID_SOCKET)
+        {
+            hSock = hDuplicatedSocket;
+            CloseHandle(hHandle); // cleaning 
+        }
+    }
+    return hSock;
+}
+
+SOCKET_LIST DuplicateSocketsFromHandles(HANDLE_LIST& lstHandles)
+{
+    SOCKET_LIST lstDupedSockets;
+    for(auto it = lstHandles.begin(); it != lstHandles.end(); ++it)
+    {
+        SOCKET hDupSock = DuplicateSocketFromHandle(*it);
+        if (hDupSock != INVALID_SOCKET)
+        {
+            lstDupedSockets.push_back(hDupSock);
+        }
+    }
+    return lstDupedSockets;
+}
+
 
 UINT g_CurrentIndex = 0;
 
-DWORD WINAPI ThreadProc(LPVOID lParam)
+DWORD WINAPI ThreadProc(LPVOID lParams)
 {
-    THREAD_PARAMS* pThreadParam = (THREAD_PARAMS*)lParam;
+    THREAD_PARAMS* pThreadParams = (THREAD_PARAMS*)lParams;
 
-    for (g_CurrentIndex; g_CurrentIndex < pThreadParam->pSysHandleInformation->dwCount; )
+    for (g_CurrentIndex; g_CurrentIndex < pThreadParams->pSysHandleInformation->dwCount; )
     {
-        WaitForSingleObject(pThreadParam->hStartEvent, INFINITE);
-        ResetEvent(pThreadParam->hStartEvent);
-        pThreadParam->bStatus = false;
-        SYSTEM_HANDLE& sh = pThreadParam->pSysHandleInformation->handles[g_CurrentIndex];
+        WaitForSingleObject(pThreadParams->hStartEvent, INFINITE);
+        ResetEvent(pThreadParams->hStartEvent);
+        pThreadParams->bStatus = false;
+        SYSTEM_HANDLE& sh = pThreadParams->pSysHandleInformation->handles[g_CurrentIndex];
         g_CurrentIndex++;
-        HANDLE hDup = (HANDLE)sh.wValue;
-        HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, sh.dwProcessId);
-        if (hProcess)
+        if (sh.dwProcessId == pThreadParams->dwProcessId)
         {
-            bool bRes = DuplicateHandle(hProcess, (HANDLE)sh.wValue, GetCurrentProcess(), &hDup, 0, FALSE, DUPLICATE_SAME_ACCESS) == TRUE;
-            if (bRes != FALSE)
+            HANDLE hDup = (HANDLE)sh.wValue;
+            HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, sh.dwProcessId);
+            if (hProcess)
             {
-                if (IsSocketHandle(hDup))
+                bool bRes = DuplicateHandle(hProcess, (HANDLE)sh.wValue, GetCurrentProcess(), &hDup, 0, FALSE, DUPLICATE_SAME_ACCESS) == TRUE;
+                if (bRes != FALSE)
                 {
-                    pThreadParam->bStatus = true;
+                    if (IsSocketHandle(hDup))
+                    {
+                        pThreadParams->bStatus = true;
+                    }
+                    else
+                    {
+                        CloseHandle(hDup);
+                    }
                 }
-                else
-                {
-                    CloseHandle(hDup);
-                }
+                CloseHandle(hProcess);
             }
-            CloseHandle(hProcess);
         }
-        SetEvent(pThreadParam->hFinishedEvent);
+        SetEvent(pThreadParams->hFinishedEvent);
     }
     return 0;
 }
@@ -122,19 +183,21 @@ DWORD WINAPI ThreadProc(LPVOID lParam)
 SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
 {
     HRESULT hRes = E_FAIL;
-    HANDLE hTargetProcess;
+    HANDLE hTargetProcess = NULL;
     SOCKET_LIST lstSocks;
     SOCKET_LIST lstDupSockets;
-    hTargetProcess = OpenProcess(PROCESS_DUP_HANDLE, false, dwProcessId);
+    HANDLE_LIST lstDupHandles;
+    hTargetProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, dwProcessId);
     if (hTargetProcess == NULL)
     {
         cerr << "Cannot open target process with pid " << dwProcessId << " for DuplicateHandle access" << endl;
     }
     else
     {
+        CloseHandle(hTargetProcess);
         // Get the list of all handles in the system
-        PSYSTEM_HANDLE_INFORMATION pSysHandleInformation = NULL;
-        DWORD size = 0;
+        PSYSTEM_HANDLE_INFORMATION pSysHandleInformation = new SYSTEM_HANDLE_INFORMATION;
+        DWORD size = sizeof(SYSTEM_HANDLE_INFORMATION);
         DWORD needed = 0;
         HMODULE hModule = LoadLibrary(_T("ntdll.dll"));
         if (hModule)
@@ -149,6 +212,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                 NTSTATUS status = NtQuerySystemInformation((SYSTEM_INFORMATION_CLASS)SystemHandleInformation, pSysHandleInformation, size, &needed);
                 if (!NT_SUCCESS(status))
                 {
+                    delete pSysHandleInformation;
                     if (0 == needed)
                     {
                         cerr << "NtQuerySystemInformatio failed" << endl;
@@ -171,9 +235,10 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                             // Start thread for NtQueryObject call
                             g_CurrentIndex = 0;
                             THREAD_PARAMS ThreadParams = { 0 };
+                            ThreadParams.dwProcessId = dwProcessId;
                             ThreadParams.pSysHandleInformation = pSysHandleInformation;
-                            ThreadParams.hStartEvent = ::CreateEvent(0, TRUE, FALSE, 0);
-                            ThreadParams.hFinishedEvent = ::CreateEvent(0, TRUE, FALSE, 0);
+                            ThreadParams.hStartEvent = CreateEvent(0, TRUE, FALSE, 0);
+                            ThreadParams.hFinishedEvent = CreateEvent(0, TRUE, FALSE, 0);
                             HANDLE hThread = NULL;
                             while (g_CurrentIndex < pSysHandleInformation->dwCount)
                             {
@@ -182,8 +247,10 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                                 {
                                     hThread = CreateThread(0, 0, ThreadProc, &ThreadParams, 0, 0);
                                 }
-                                if (hThread && ThreadParams.hFinishedEvent && ThreadParams.hStartEvent)
+                                if (hThread)
                                 {
+                                    ASSERT(ThreadParams.hStartEvent != INVALID_HANDLE_VALUE && ThreadParams.hStartEvent != NULL);
+                                    ASSERT(ThreadParams.hFinishedEvent != INVALID_HANDLE_VALUE && ThreadParams.hFinishedEvent != NULL);
                                     ResetEvent(ThreadParams.hFinishedEvent);
                                     SetEvent(ThreadParams.hStartEvent);
                                     if (WAIT_TIMEOUT == WaitForSingleObject(ThreadParams.hFinishedEvent, 100))
@@ -199,7 +266,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                                     {
                                         if (ThreadParams.bStatus)
                                         {
-                                            lstDupSockets.push_back((SOCKET)hCurrentHandle);
+                                            lstDupHandles.push_back(hCurrentHandle);
                                         }
                                     }
                                 }
@@ -209,9 +276,11 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                             delete[] rawSystemHandleInformation;
                             rawSystemHandleInformation = NULL;
                             pSysHandleInformation = NULL;
-                            if (lstDupSockets.size() > 0)
+                            if (lstDupHandles.size() > 0)
                             {
-                                lstSocks = FilterAndOrderSocketsByBytesIn(lstDupSockets);
+                                lstDupSockets = DuplicateSocketsFromHandles(lstDupHandles);
+                                if(lstDupSockets.size() > 0)
+                                    lstSocks = FilterAndOrderSocketsByBytesIn(lstDupSockets);
                             }
                         }
                     }
@@ -340,10 +409,10 @@ bool SetSocketBlockingMode(SOCKET hSock, int iMode)
     return iResult == 0;
 }
 
-int InitWSAThread()
+bool InitWSAThread()
 {
     WSADATA WSAData;
-    return WSAStartup(MAKEWORD(2, 0), &WSAData);
+    return WSAStartup(MAKEWORD(2, 0), &WSAData) == 0;
 }
 
 void ShutdownWSAThread()
