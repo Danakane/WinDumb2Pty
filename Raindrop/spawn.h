@@ -10,6 +10,8 @@
 
 DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 
+HANDLE GetProcessHandle(DWORD dwProcessId);
+
 bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite);
 
 void InitConsole(HANDLE& hOldStdIn, HANDLE& hOldStdOut, HANDLE& hOldStdErr);
@@ -53,6 +55,8 @@ typedef NTSTATUS(NTAPI* NtSuspendProcessPtr)(
 
 typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
 	HANDLE	ProcessHandle
-	);
+);
+
+HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine);
 
 #endif

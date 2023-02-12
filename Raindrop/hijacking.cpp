@@ -321,6 +321,11 @@ SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket)
             cerr << "debug: No overlapped sockets found. Trying to return also non-overlapped sockets..." << endl;
             hSock = lstSocks.front();
         }
+        // close duplicated socket handle not returned to avoid leaking handles.
+        for (auto it = lstSocks.begin(); it != lstSocks.end(); ++it)
+        {
+            if (*it != hSock) closesocket(*it);
+        }
     }
     return hSock;
 }
