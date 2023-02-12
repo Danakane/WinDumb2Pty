@@ -120,7 +120,13 @@ SOCKET DuplicateSocketFromHandle(HANDLE hHandle)
         if (hDuplicatedSocket != INVALID_SOCKET)
         {
             hSock = hDuplicatedSocket;
-            CloseHandle(hHandle); // cleaning 
+            try
+            {
+                CloseHandle(hHandle); // cleaning 
+            }
+            catch (const std::system_error& e)
+            {
+            }
         }
     }
     return hSock;

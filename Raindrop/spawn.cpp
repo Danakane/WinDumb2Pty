@@ -198,13 +198,9 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
     return 0;
 }
 
-HANDLE StartThreadReadPipeWriteSocket(HANDLE hPipe, SOCKET hSock, bool overlappedSocket)
+HANDLE StartThreadReadPipeWriteSocket(ReadPipeWriteSocketThreadParams* pParams)
 {
-    ReadPipeWriteSocketThreadParams params;
-    memset(&params, 0, sizeof(ReadPipeWriteSocketThreadParams));
-    params.hPipe = hPipe;
-    params.hSock = hSock;
-    HANDLE hThread = CreateThread(0, 0, ThreadReadPipeWriteSocket, &params, 0, 0);
+    HANDLE hThread = CreateThread(0, 0, ThreadReadPipeWriteSocket, pParams, 0, 0);
     return hThread;
 }
 
@@ -264,15 +260,9 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
     return 0;
 }
 
-HANDLE StartThreadReadSocketWritePipe(HANDLE hPipe, SOCKET hSock, HANDLE hChildProcess, bool bOverlappedSocket)
+HANDLE StartThreadReadSocketWritePipe(ReadSocketWritePipeThreadParams* pParams)
 {
-    ReadSocketWritePipeThreadParams params;
-    memset(&params, 0, sizeof(ReadSocketWritePipeThreadParams));
-    params.hPipe = hPipe;
-    params.hSock = hSock;
-    params.hChildProcess = hChildProcess;
-    params.bOverlapped = bOverlappedSocket;
-    HANDLE hThread = CreateThread(0, 0, ThreadReadSocketWritePipe, &params, 0, 0);
+    HANDLE hThread = CreateThread(0, 0, ThreadReadSocketWritePipe, pParams, 0, 0);
     return hThread;
 }
 
@@ -408,9 +398,18 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                                 }
                                 if (!bOverlapped) SetSocketBlockingMode(hSock, 1);
                                 // The threads functions doesn't work: Check if there is any problem with the pipes or the socket
-                                HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(hOutputPipeRead, hSock, bOverlapped);
-                                HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(hInputPipeWrite, hSock, 
-                                    childProcessInfo.hProcess, bOverlapped);
+                                ReadPipeWriteSocketThreadParams params1;
+                                memset(&params1, 0, sizeof(ReadPipeWriteSocketThreadParams));
+                                params1.hPipe = hOutputPipeRead;
+                                params1.hSock = hSock;
+                                ReadSocketWritePipeThreadParams params2;
+                                memset(&params2, 0, sizeof(ReadSocketWritePipeThreadParams));
+                                params2.hPipe = hInputPipeWrite;
+                                params2.hSock = hSock;
+                                params2.hChildProcess = childProcessInfo.hProcess;
+                                params2.bOverlapped = bOverlapped;
+                                HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(&params1);
+                                HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(&params2);
                                 cout << _T("SUCCESS: pty ready!") << endl;
                                 hRes = S_OK;
                                 // wait for the child process until exit

@@ -37,7 +37,7 @@ typedef struct _ReadPipeWriteSocketThreadParams
 
 DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams);
 
-HANDLE StartThreadReadPipeWriteSocket(HANDLE hPipe, SOCKET hSock, bool overlappedSocket);
+HANDLE StartThreadReadPipeWriteSocket(ReadPipeWriteSocketThreadParams* pParams);
 
 typedef struct _ReadSocketWritePipeThreadParams
 {
@@ -49,7 +49,7 @@ typedef struct _ReadSocketWritePipeThreadParams
 
 DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams);
 
-HANDLE StartThreadReadSocketWritePipe(HANDLE hPipe, SOCKET hSock, HANDLE hChildProcess, bool bOverlappedSocket);
+HANDLE StartThreadReadSocketWritePipe(ReadSocketWritePipeThreadParams* pParams);
 
 typedef NTSTATUS(NTAPI* NtSuspendProcessPtr)(
 	HANDLE	ProcessHandle
