@@ -163,6 +163,7 @@ HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csComm
     if (SUCCEEDED(hRes))
     {
         hRes = RunProcess(startupInfo, csCommandLine, pProcessInfo);
+        HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList); // free memory allocated by ConfigureProcessThread
     }
     return hRes;
 }
@@ -406,6 +407,7 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                                     }
                                 }
                                 if (!bOverlapped) SetSocketBlockingMode(hSock, 1);
+                                // The threads functions doesn't work: Check if there is any problem with the pipes or the socket
                                 HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(hOutputPipeRead, hSock, bOverlapped);
                                 HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(hInputPipeWrite, hSock, 
                                     childProcessInfo.hProcess, bOverlapped);
