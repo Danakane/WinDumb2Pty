@@ -2,12 +2,13 @@
 #define _SPAWN_H_
 
 #include "stdafx.h"
+#include "hijacking.h"
 
 #define BUFFER_SIZE_PIPE 1048576
 
 #define BUFFER_SIZE_SOCKET 8192
 
-DWORD  GetParentProcess();
+DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 
 bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite);
 
@@ -45,5 +46,13 @@ typedef struct _ReadSocketWritePipeThreadParams
 DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams);
 
 HANDLE StartThreadReadSocketWritePipe(HANDLE hPipe, SOCKET hSock, HANDLE hChildProcess, bool bOverlappedSocket);
+
+typedef NTSTATUS(NTAPI* NtSuspendProcessPtr)(
+	HANDLE	ProcessHandle
+);
+
+typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
+	HANDLE	ProcessHandle
+	);
 
 #endif

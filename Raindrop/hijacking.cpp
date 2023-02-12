@@ -7,17 +7,18 @@ bool IsSocketHandle(HANDLE hHandle)
     HMODULE hMod = LoadLibrary(_T("ntdll.dll"));
     if (hMod)
     {
-        NtQueryObjectPtr QueryObj = (NtQueryObjectPtr)::GetProcAddress(hMod, "NtQueryObject");
-        if (QueryObj)
+        NtQueryObjectPtr NtQueryObject = (NtQueryObjectPtr)::GetProcAddress(hMod, "NtQueryObject");
+        if (NtQueryObject)
         {
             ULONG OutSize = 0;
-            NTSTATUS NtStatus = QueryObj(hHandle, ObjectTypeInformation, NULL, 0, &OutSize);
+            NTSTATUS NtStatus = NtQueryObject(hHandle, ObjectTypeInformation, NULL, 0, &OutSize);
             vector<BYTE> buffer(OutSize);
             PPUBLIC_OBJECT_TYPE_INFORMATION TypeInfo = (PPUBLIC_OBJECT_TYPE_INFORMATION)&buffer[0];
             ULONG InSize = OutSize;
-            NtStatus = QueryObj(hHandle, ObjectTypeInformation, TypeInfo, InSize, &OutSize);
+            NtStatus = NtQueryObject(hHandle, ObjectTypeInformation, TypeInfo, InSize, &OutSize);
             bRes = (0 == wcscmp(_T("\\Device\\Afd"), CString(TypeInfo->TypeName.Buffer, TypeInfo->TypeName.Length).GetBuffer()));
         }
+        FreeLibrary(hMod);
     }
     return bRes;
 }
@@ -135,7 +136,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
         PSYSTEM_HANDLE_INFORMATION pSysHandleInformation = NULL;
         DWORD size = 0;
         DWORD needed = 0;
-        HMODULE hModule = GetModuleHandle(_T("ntdll.dll"));
+        HMODULE hModule = LoadLibrary(_T("ntdll.dll"));
         if (hModule)
         {
             NtQuerySystemInformationPtr NtQuerySystemInformation = (NtQuerySystemInformationPtr)GetProcAddress(hModule, "NtQuerySystemInformation");
@@ -185,7 +186,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                                 {
                                     ResetEvent(ThreadParams.hFinishedEvent);
                                     SetEvent(ThreadParams.hStartEvent);
-                                    if (WAIT_TIMEOUT == WaitForSingleObject(ThreadParams.hFinishedEvent, 1000))
+                                    if (WAIT_TIMEOUT == WaitForSingleObject(ThreadParams.hFinishedEvent, 100))
                                     {
                                         CString csError;
                                         csError.Format(L"Query hang for handle %p", hCurrentHandle);
@@ -215,7 +216,9 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                         }
                     }
                 }
+                FreeModule(hModule);
             }
+            FreeLibrary(hModule);
         }
         else
         {
@@ -332,13 +335,13 @@ bool SetSocketBlockingMode(SOCKET hSock, int iMode)
     return iResult == 0;
 }
 
-int InitWinSockApi()
+int InitWSAThread()
 {
     WSADATA WSAData;
     return WSAStartup(MAKEWORD(2, 0), &WSAData);
 }
 
-void ShutdownWinSockApi()
+void ShutdownWSAThread()
 {
     WSACleanup();
 }

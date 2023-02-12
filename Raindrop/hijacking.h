@@ -225,10 +225,8 @@ SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket);
 
 bool SetSocketBlockingMode(SOCKET hSock, int iMode);
 
-int InitWinSockApi();
+int InitWSAThread();
 
-void ShutdownWinSockApi();
-
-HRESULT InitializeStartupInfoAttachedToConPTY(STARTUPINFOEX* siEx, HPCON hPC);
+void ShutdownWSAThread();
 
 #endif

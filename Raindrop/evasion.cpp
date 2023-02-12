@@ -4,7 +4,7 @@ int UnHookDll(CString module, CString path)
 {
 	HANDLE process = GetCurrentProcess();
 	MODULEINFO mi = {};
-	HMODULE ntdllModule = GetModuleHandle(module); //"ntdll.dll"
+	HMODULE ntdllModule = LoadLibrary(module); //"ntdll.dll"
 	if (ntdllModule != NULL)
 	{
 		GetModuleInformation(process, ntdllModule, &mi, sizeof(mi));
@@ -32,9 +32,6 @@ int UnHookDll(CString module, CString path)
 		CloseHandle(ntdllFile);
 		FreeLibrary(ntdllModule);
 	}
-
 	CloseHandle(process);
-	
-
 	return 0;
 }
