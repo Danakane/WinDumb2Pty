@@ -59,6 +59,6 @@ typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
 	HANDLE	ProcessHandle
 );
 
-HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine);
+HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols);
 
 #endif

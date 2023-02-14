@@ -236,8 +236,4 @@ SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket);
 
 bool SetSocketBlockingMode(SOCKET hSock, int iMode);
 
-bool InitWSAThread();
-
-void ShutdownWSAThread();
-
 #endif

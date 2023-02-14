@@ -414,14 +414,3 @@ bool SetSocketBlockingMode(SOCKET hSock, int iMode)
         cerr << _T("ioctlsocket failed with return code ") << iResult << _T(" and wsalasterror: ") << WSAGetLastError() << endl;
     return iResult == 0;
 }
-
-bool InitWSAThread()
-{
-    WSADATA WSAData;
-    return WSAStartup(MAKEWORD(2, 0), &WSAData) == 0;
-}
-
-void ShutdownWSAThread()
-{
-    WSACleanup();
-}

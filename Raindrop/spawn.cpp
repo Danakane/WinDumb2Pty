@@ -266,7 +266,7 @@ HANDLE StartThreadReadSocketWritePipe(ReadSocketWritePipeThreadParams* pParams)
     return hThread;
 }
 
-HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
+HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols)
 {
     HRESULT hRes = E_FAIL;
     HMODULE hKernel32 = LoadLibrary(_T("kernel32.dll"));
@@ -285,7 +285,8 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                 HANDLE hOldStdOut = NULL;
                 HANDLE hOldStdErr = NULL;
                 InitConsole(hOldStdIn, hOldStdOut, hOldStdErr);
-                if (InitWSAThread())
+                WSADATA wsaData;
+                if (WSAStartup(MAKEWORD(2, 0), &wsaData) == 0)
                 {
                     DWORD dwProcessId = GetCurrentProcessId();
                     DWORD dwParentProcessId = GetParentProcessId();
@@ -410,7 +411,8 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                                 params2.bOverlapped = bOverlapped;
                                 HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(&params1);
                                 HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(&params2);
-                                cout << _T("SUCCESS: pty ready!") << endl;
+                                char szSuccessMsg[] = "SUCCESS: pty ready!\n";
+                                send(hSock, szSuccessMsg, (int)strlen(szSuccessMsg), 0);
                                 hRes = S_OK;
                                 // wait for the child process until exit
                                 WaitForSingleObject(childProcessInfo.hProcess, INFINITE);
@@ -473,7 +475,7 @@ HRESULT SpawnPty(DWORD dwRows, DWORD dwCols, CString csCommandLine)
                     }
                     if (hParentProcess != NULL && hParentProcess != INVALID_HANDLE_VALUE) CloseHandle(hParentProcess);
                     if (hGrandParentProcess != NULL && hGrandParentProcess != INVALID_HANDLE_VALUE) CloseHandle(hGrandParentProcess);
-                    ShutdownWSAThread();
+                    WSACleanup();
                 }
                 else
                 {
