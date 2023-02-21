@@ -2,7 +2,9 @@
 #define _SPAWN_H_
 
 #include "stdafx.h"
+#include "wininternal.h"
 #include "hijacking.h"
+
 
 #define BUFFER_SIZE_PIPE 1048576
 
@@ -11,6 +13,8 @@
 DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 
 HANDLE GetProcessHandle(DWORD dwProcessId);
+
+bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory);
 
 bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite);
 
@@ -28,28 +32,30 @@ HRESULT RunProcess(STARTUPINFOEX& startupInfo, CString csCommandLine, OUT PROCES
 
 HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
 
-typedef struct _ReadPipeWriteSocketThreadParams 
+
+typedef struct _CommunicationThreadParams
 {
-	HANDLE hPipe;
+	char* pPopenControlCode;
+	char* pPtyControlCode;
+	HANDLE hInPipe;
+	HANDLE hOutPipe;
 	SOCKET hSock;
+	PROCESS_INFORMATION piInfo;
+	HANDLE hBlockWriteSockThread;
 	bool bOverlapped;
-} ReadPipeWriteSocketThreadParams;
+} CommunicationThreadParams; 
 
 DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams);
 
-HANDLE StartThreadReadPipeWriteSocket(ReadPipeWriteSocketThreadParams* pParams);
+HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams);
 
-typedef struct _ReadSocketWritePipeThreadParams
-{
-	HANDLE hPipe;
-	SOCKET hSock;
-	HANDLE hChildProcess;
-	bool bOverlapped;
-} ReadSocketWritePipeThreadParams;
+int CheckBufferMatch(char* pBuf, int iBufSize, char* pNewData, int iNewDataSize, char* pControlBuf, int iControlBufSize, char* pRemainBuf, int* pRemainSize);
+
+bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped);
 
 DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams);
 
-HANDLE StartThreadReadSocketWritePipe(ReadSocketWritePipeThreadParams* pParams);
+HANDLE StartThreadReadSocketWritePipe(CommunicationThreadParams* pParams);
 
 typedef NTSTATUS(NTAPI* NtSuspendProcessPtr)(
 	HANDLE	ProcessHandle
@@ -59,6 +65,6 @@ typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
 	HANDLE	ProcessHandle
 );
 
-HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols);
+HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlString, char* pPtyControlString);
 
 #endif

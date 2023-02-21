@@ -39,6 +39,55 @@ HANDLE GetProcessHandle(DWORD dwProcessId)
     return hProcess;
 }
 
+bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory)
+{
+    bool bRes = false;
+
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, dwProcessId);
+    if (hProcess != INVALID_HANDLE_VALUE && hProcess != NULL)
+    {
+        // Load NTDLL library and get NtQueryInformationProcess function pointer
+        HMODULE hNtdll = LoadLibrary(L"ntdll.dll");
+        if (hNtdll != NULL)
+        {
+            NtQueryInformationProcessPtr NtQueryInformationProcess = (NtQueryInformationProcessPtr)GetProcAddress(hNtdll, "NtQueryInformationProcess");
+            if (NtQueryInformationProcess != NULL)
+            {
+                PROCESS_BASIC_INFORMATION basicInfo;
+                ULONG ulReturnLength;
+                NTSTATUS ntStatus = NtQueryInformationProcess(hProcess, ProcessBasicInformation, &basicInfo, sizeof(basicInfo), &ulReturnLength);
+                if (NT_SUCCESS(ntStatus))
+                {
+                    // Read PEB structure from child process memory
+                    PEB peb;
+                    SIZE_T bytesRead;
+                    if (ReadProcessMemory(hProcess, basicInfo.PebBaseAddress, &peb, sizeof(peb), &bytesRead))
+                    {
+                        // Read RTL_USER_PROCESS_PARAMETERS structure from child process memory
+                        RTL_USER_PROCESS_PARAMETERS processParams;
+                        if (ReadProcessMemory(hProcess, peb.ProcessParameters, &processParams, sizeof(processParams), &bytesRead))
+                        {
+                            // Copy current directory path to output string
+                            PVOID pBuf = processParams.CurrentDirectoryPath.Buffer;
+                            USHORT uLength = processParams.CurrentDirectoryPath.Length;
+                            wchar_t* pPath = new wchar_t[uLength / 2 + 1];
+                            ZeroMemory(pPath, sizeof(wchar_t) * (uLength / 2 + 1));
+                            SIZE_T nRead = 0;
+                            ReadProcessMemory(hProcess, pBuf, pPath, uLength, &nRead);
+                            csCurrentWorkingDirectory = CString(pPath, uLength);
+                            bRes = true;
+                            delete[] pPath;
+                        }
+                    }
+                }
+            }
+            FreeModule(hNtdll);
+        }
+        CloseHandle(hProcess);
+    }
+    return bRes;
+}
+
 bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite)
 {
     // Create the in/out pipes:
@@ -170,8 +219,8 @@ HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csComm
 
 DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
 {
-    ReadPipeWriteSocketThreadParams* pThreadParams = (ReadPipeWriteSocketThreadParams*)lpParams;
-    HANDLE hPipe = pThreadParams->hPipe;
+    CommunicationThreadParams* pThreadParams = (CommunicationThreadParams*)lpParams;
+    HANDLE hPipe = pThreadParams->hOutPipe;
     SOCKET hSock = pThreadParams->hSock;
     bool bOverlapped = pThreadParams->bOverlapped;
     bool bReadSuccess = false;
@@ -180,7 +229,7 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
     char pBytesToWrite[BUFFER_SIZE_SOCKET];
     do
     {        
-        memset(pBytesToWrite, 0, BUFFER_SIZE_SOCKET);
+        ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
         bReadSuccess = ReadFile(hPipe, pBytesToWrite, BUFFER_SIZE_SOCKET, &dwBytesRead, NULL);
         if (bReadSuccess)
         {
@@ -198,32 +247,86 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
     return 0;
 }
 
-HANDLE StartThreadReadPipeWriteSocket(ReadPipeWriteSocketThreadParams* pParams)
+HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams)
 {
     HANDLE hThread = CreateThread(0, 0, ThreadReadPipeWriteSocket, pParams, 0, 0);
     return hThread;
 }
 
-
-DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
+int CheckBufferMatch(char* pBuf, int iBufSize, char* pNewData, int iNewDataSize, char* pControlBuf, int iControlBufSize, char* pRemainBuf, int* pRemainSize)
 {
-    ReadSocketWritePipeThreadParams* pThreadParams = (ReadSocketWritePipeThreadParams*)lpParams;
-    HANDLE hPipe = pThreadParams->hPipe;
-    SOCKET hSock = pThreadParams->hSock;
-    HANDLE hChildProcess = pThreadParams->hChildProcess;
-    bool bOverlapped = pThreadParams->bOverlapped;
+    int iRes = 0; 
+    // Concatenate the two input buffers
+    char* pConcatBuf = new char[iBufSize + iNewDataSize];
+    memcpy(pConcatBuf, pBuf, iBufSize);
+    memcpy(pConcatBuf + iBufSize, pNewData, iNewDataSize);
+    bool bRes = true;
+    // Check if the concatenated buffer matches the control buffer
+    if (iBufSize + iNewDataSize >= iControlBufSize)
+    {
+        for (int i = 0; i < iControlBufSize; ++i)
+        {
+            if (pConcatBuf[i] != pControlBuf[i])
+            {
+                bRes = false;
+                break;
+            }
+        }
+        // Determine the output values
+        if (bRes)
+        {
+            // If the concatenated buffer matches, return 1 and the remaining bytes in the second buffer
+            pRemainBuf = pNewData + iControlBufSize - iBufSize;
+            *pRemainSize = iNewDataSize + iBufSize - iControlBufSize;
+            iRes = 1;
+        }
+        else
+        {
+            // If there is no match, return 0
+            iRes = 0;
+        }
+    }
+    else
+    {
+        for (int i = 0; i < iBufSize + iNewDataSize; ++i)
+        {
+            cout << pConcatBuf[i] << "!=" << pControlBuf[i] << endl;
+            if (pConcatBuf[i] != pControlBuf[i])
+            {
+                cout << pConcatBuf[i] << "!=" << pControlBuf[i] << endl;
+                bRes = false;
+                break;
+            }
+        }
+        iRes = bRes ? 2 : 0;
+    }
+
+    delete[] pConcatBuf;
+
+    return iRes;
+}
+
+bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char pRemain, DWORD dwBufferSize, DWORD& dwRemainSize)
+{
+    /* Read the socket and write the pipe
+    * When it receive a buffer that contains "\x01cG9wZW4K\x01\r" which popen in base64 with \x01 at the beginning and at the end
+    * It return with true and copy the remaining data in pRemain buffer
+    * The function start bufferizing the data received when it receive a \x01 
+    * if the bufferized data doesn't match the control string it send the data in the pipe
+    */
     bool bWriteSuccess = false;
     DWORD dwBytesReceived = 0;
     DWORD dwBytesWritten = 0;;
     bool bSocketBlockingOperation = false;
     char pBytesReceived[BUFFER_SIZE_SOCKET];
+
     if (bOverlapped)
     {
         do
         {
-            memset(pBytesReceived, 0, BUFFER_SIZE_SOCKET);
+            ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
             dwBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
-            if(dwBytesReceived > 0)
+            if (dwBytesReceived > 0)
                 bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwBytesReceived, &dwBytesWritten, NULL);
         } while (dwBytesReceived > 0 && bWriteSuccess);
     }
@@ -237,7 +340,7 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
             {
                 do
                 {
-                    memset(pBytesReceived, 0, BUFFER_SIZE_SOCKET);
+                    ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
                     WSAWaitForMultipleEvents(1, &hReadEvent, true, 500, false);
                     dwBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
                     // we still check WSAEWOULDBLOCK for a more robust implementation
@@ -256,17 +359,32 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
             WSACloseEvent(hReadEvent);
         }
     }
+}
+
+
+DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
+{
+    CommunicationThreadParams* pThreadParams = (CommunicationThreadParams*)lpParams;
+    HANDLE hPipe = pThreadParams->hInPipe;
+    SOCKET hSock = pThreadParams->hSock;
+    HANDLE hChildProcess = pThreadParams->piInfo.hProcess;
+    bool bOverlapped = pThreadParams->bOverlapped;
+    bool bPopenMode = false; // by default we're in pty mode
+    
+    CString csCwd;
+    bool bRes = GetProcessCwd(pThreadParams->piInfo.dwProcessId, csCwd);
+    
     TerminateProcess(hChildProcess, 0);
     return 0;
 }
 
-HANDLE StartThreadReadSocketWritePipe(ReadSocketWritePipeThreadParams* pParams)
+HANDLE StartThreadReadSocketWritePipe(CommunicationThreadParams* pParams)
 {
     HANDLE hThread = CreateThread(0, 0, ThreadReadSocketWritePipe, pParams, 0, 0);
     return hThread;
 }
 
-HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols)
+HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlString, char* pPtyControlString)
 {
     HRESULT hRes = E_FAIL;
     HMODULE hKernel32 = LoadLibrary(_T("kernel32.dll"));
@@ -399,30 +517,54 @@ HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols)
                                 }
                                 if (!bOverlapped) SetSocketBlockingMode(hSock, 1);
                                 // The threads functions doesn't work: Check if there is any problem with the pipes or the socket
-                                ReadPipeWriteSocketThreadParams params1;
-                                memset(&params1, 0, sizeof(ReadPipeWriteSocketThreadParams));
-                                params1.hPipe = hOutputPipeRead;
-                                params1.hSock = hSock;
-                                ReadSocketWritePipeThreadParams params2;
-                                memset(&params2, 0, sizeof(ReadSocketWritePipeThreadParams));
-                                params2.hPipe = hInputPipeWrite;
-                                params2.hSock = hSock;
-                                params2.hChildProcess = childProcessInfo.hProcess;
-                                params2.bOverlapped = bOverlapped;
-                                HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(&params1);
-                                HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(&params2);
-                                char szSuccessMsg[] = "SUCCESS: pty ready!\n";
-                                send(hSock, szSuccessMsg, (int)strlen(szSuccessMsg), 0);
-                                hRes = S_OK;
-                                // wait for the child process until exit
-                                WaitForSingleObject(childProcessInfo.hProcess, INFINITE);
-                                //cleanup everything
-                                TerminateThread(hThreadReadPipeWriteSocket, 0);
-                                TerminateThread(hThreadReadSocketWritePipe, 0);
+                                CommunicationThreadParams params;
+                                ZeroMemory(&params, sizeof(CommunicationThreadParams));
+                                HANDLE hBlockWriteSockThread = CreateEvent(NULL, TRUE, TRUE, NULL); // handle for the read sock thread to block the write sock thread in popen mode
+                                if (hBlockWriteSockThread != NULL && hBlockWriteSockThread != INVALID_HANDLE_VALUE)
+                                {
+                                    size_t sizePopenControlString = strlen(pPopenControlString);
+                                    char* pPopenControlCode = new char[sizePopenControlString + 3];
+                                    ZeroMemory(pPopenControlCode, sizePopenControlString + 3);
+                                    pPopenControlCode[0] = '\x01';
+                                    memcpy(pPopenControlCode + 1, pPopenControlString, sizePopenControlString - 1); // the -1 is to remove the terminal null byte
+                                    pPopenControlCode[sizePopenControlString] = '\r';
+                                    pPopenControlCode[sizePopenControlString + 1] = '\x01';
+                                    //pPopenControlCode[sizePtyControlString + 2] = '\x00';
+                                    size_t sizePtyControlString = strlen(pPtyControlString);
+                                    char* pPtyControlCode = new char[sizePtyControlString + 3];
+                                    ZeroMemory(pPtyControlCode, sizePtyControlString + 3);
+                                    pPtyControlCode[0] = '\x01';
+                                    memcpy(pPtyControlCode + 1, pPtyControlString, sizePtyControlString - 1); // the -1 is to remove the terminal null byte
+                                    pPtyControlCode[sizePtyControlString] = '\r';
+                                    pPtyControlCode[sizePtyControlString + 1] = '\x01';
+                                    //pPtyControlCode[sizePtyControlString + 2] = '\x00';
+                                    params.pPopenControlCode = pPopenControlCode;
+                                    params.pPtyControlCode = pPtyControlCode;
+                                    params.hInPipe = hInputPipeWrite;
+                                    params.hOutPipe = hOutputPipeRead;
+                                    params.hSock = hSock;
+                                    params.piInfo = childProcessInfo;
+                                    params.bOverlapped = bOverlapped;
+                                    HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(&params);
+                                    HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(&params);
+                                    char szSuccessMsg[] = "SUCCESS: pty ready!\n";
+                                    send(hSock, szSuccessMsg, (int)strlen(szSuccessMsg), 0);
+                                    hRes = S_OK;
+                                    // wait for the child process until exit
+                                    WaitForSingleObject(childProcessInfo.hProcess, INFINITE);
+                                    //cleanup everything
+                                    TerminateThread(hThreadReadPipeWriteSocket, 0);
+                                    TerminateThread(hThreadReadSocketWritePipe, 0);
+                                    delete[] pPopenControlCode;
+                                    delete[] pPtyControlCode;
+                                    if (!bOverlapped)
+                                    {
+                                        // cancelling the event selection for the socket
+                                        WSAEventSelect(hSock, NULL, 0);
+                                    }
+                                }
                                 if (!bOverlapped)
                                 {
-                                    // cancelling the event selection for the socket
-                                    WSAEventSelect(hSock, NULL, 0);
                                     SetSocketBlockingMode(hSock, 0);
                                 }
                                 if (bParentSocketInherited || bGrandParentSocketInherited)
