@@ -49,9 +49,15 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams);
 
 HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams);
 
-int CheckBufferMatch(char* pBuf, int iBufSize, char* pNewData, int iNewDataSize, char* pControlBuf, int iControlBufSize, char* pRemainBuf, int* pRemainSize);
+bool ParseReceivedBytes(char* pBytesReceived, DWORD dwNbBytesReceived, char* pBytesToHold, DWORD* pNbBytesToHold,
+	char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPopenControlCode, DWORD dwPopenControlCodeSize,
+	char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes);
 
-bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped);
+bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPopenControlCode, DWORD dwPopenControlCodeSize,
+		char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainBytes);
+
+bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyControlCode, DWORD dwPtyControlCodeSize,
+	char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes);
 
 DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams);
 
@@ -65,6 +71,6 @@ typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
 	HANDLE	ProcessHandle
 );
 
-HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlString, char* pPtyControlString);
+HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode);
 
 #endif

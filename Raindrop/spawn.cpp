@@ -222,6 +222,7 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
     CommunicationThreadParams* pThreadParams = (CommunicationThreadParams*)lpParams;
     HANDLE hPipe = pThreadParams->hOutPipe;
     SOCKET hSock = pThreadParams->hSock;
+    HANDLE  hBlockWriteSockThread = pThreadParams->hBlockWriteSockThread;
     bool bOverlapped = pThreadParams->bOverlapped;
     bool bReadSuccess = false;
     DWORD dwBytesSent = 0;
@@ -230,6 +231,7 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
     do
     {        
         ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+        WaitForSingleObject(hBlockWriteSockThread, INFINITE);
         bReadSuccess = ReadFile(hPipe, pBytesToWrite, BUFFER_SIZE_SOCKET, &dwBytesRead, NULL);
         if (bReadSuccess)
         {
@@ -253,82 +255,102 @@ HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams)
     return hThread;
 }
 
-int CheckBufferMatch(char* pBuf, int iBufSize, char* pNewData, int iNewDataSize, char* pControlBuf, int iControlBufSize, char* pRemainBuf, int* pRemainSize)
+bool ParseReceivedBytes(char* pBytesReceived, DWORD dwNbBytesReceived, char* pBytesToHold, DWORD* pNbBytesToHold, 
+    char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPopenControlCode, DWORD dwPopenControlCodeSize, 
+    char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes)
 {
-    int iRes = 0; 
-    // Concatenate the two input buffers
-    char* pConcatBuf = new char[iBufSize + iNewDataSize];
-    memcpy(pConcatBuf, pBuf, iBufSize);
-    memcpy(pConcatBuf + iBufSize, pNewData, iNewDataSize);
-    bool bRes = true;
-    // Check if the concatenated buffer matches the control buffer
-    if (iBufSize + iNewDataSize >= iControlBufSize)
+    bool bSwitchMode = false;
+    DWORD dwBytesToHold = *pNbBytesToHold;
+    DWORD dwBytesToWrite = 0;
+    for (DWORD i = 0; i < dwNbBytesReceived; ++i)
     {
-        for (int i = 0; i < iControlBufSize; ++i)
+        if (dwBytesToHold < dwPopenControlCodeSize && pBytesReceived[i] == pPopenControlCode[dwBytesToHold])
         {
-            if (pConcatBuf[i] != pControlBuf[i])
+            pBytesToHold[dwBytesToHold++] = pBytesReceived[i];
+            if (dwBytesToHold == dwPopenControlCodeSize)
             {
-                bRes = false;
+                bSwitchMode = true;
+                *pNbRemainingBytes = min(dwNbBytesReceived - (i + 1), dwRemainingBufferSize); // 0 if i == dwBytesReceived and dwBytesReceived - 1 if i = 0
+                if (*pNbRemainingBytes > 0)
+                {
+                    // copy the remaining bytes of the receiving buffer: they are going to be returned.
+                    ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                    memcpy(pRemainingBytes, pBytesReceived + i + 1, *pNbRemainingBytes);
+                }
                 break;
             }
-        }
-        // Determine the output values
-        if (bRes)
-        {
-            // If the concatenated buffer matches, return 1 and the remaining bytes in the second buffer
-            pRemainBuf = pNewData + iControlBufSize - iBufSize;
-            *pRemainSize = iNewDataSize + iBufSize - iControlBufSize;
-            iRes = 1;
         }
         else
         {
-            // If there is no match, return 0
-            iRes = 0;
-        }
-    }
-    else
-    {
-        for (int i = 0; i < iBufSize + iNewDataSize; ++i)
-        {
-            cout << pConcatBuf[i] << "!=" << pControlBuf[i] << endl;
-            if (pConcatBuf[i] != pControlBuf[i])
+            if (dwBytesToHold != 0)
             {
-                cout << pConcatBuf[i] << "!=" << pControlBuf[i] << endl;
-                bRes = false;
-                break;
+                memcpy(pBytesToWrite + dwBytesToWrite, pBytesToHold, dwBytesToHold);
+                dwBytesToWrite += dwBytesToHold;
+                ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET); // reset the holding buffer
+                dwBytesToHold = 0;
+            }
+            else
+            {
+                pBytesToWrite[dwBytesToWrite++] = pBytesReceived[i];
             }
         }
-        iRes = bRes ? 2 : 0;
+        
     }
-
-    delete[] pConcatBuf;
-
-    return iRes;
+    *pNbBytesToHold = dwBytesToHold;
+    *pNbBytesToWrite = dwBytesToWrite;
+    return bSwitchMode;
 }
 
-bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char pRemain, DWORD dwBufferSize, DWORD& dwRemainSize)
+bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPopenControlCode, DWORD dwPopenControlCodeSize, 
+    char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes)
 {
     /* Read the socket and write the pipe
-    * When it receive a buffer that contains "\x01cG9wZW4K\x01\r" which popen in base64 with \x01 at the beginning and at the end
-    * It return with true and copy the remaining data in pRemain buffer
-    * The function start bufferizing the data received when it receive a \x01 
-    * if the bufferized data doesn't match the control string it send the data in the pipe
+    * When it receive a buffer that contains popen mode control code
+    * It copies the remaining data in pRemainingBytes buffer and return with true
     */
+    bool bSwitchMode = false;
+
     bool bWriteSuccess = false;
-    DWORD dwBytesReceived = 0;
-    DWORD dwBytesWritten = 0;;
     bool bSocketBlockingOperation = false;
+
     char pBytesReceived[BUFFER_SIZE_SOCKET];
+    char *pBytesToHold = new char[BUFFER_SIZE_SOCKET];
+    char *pBytesToWrite = new char[BUFFER_SIZE_SOCKET];
+    DWORD dwNbBytesReceived = 0;
+    DWORD dwNbBytesWritten = 0;
+    DWORD dwNbBytesToHold = 0;
+    DWORD dwNbBytesToWrite = 0;
+
+    ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET);
+    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
 
     if (bOverlapped)
     {
         do
         {
             ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
-            dwBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
-            if (dwBytesReceived > 0)
-                bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwBytesReceived, &dwBytesWritten, NULL);
-        } while (dwBytesReceived > 0 && bWriteSuccess);
+            if (*pNbRemainingBytes > 0)
+            {
+                // transfert remaining bytes to pBytesReceived buffer
+                memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
+                dwNbBytesReceived = *pNbRemainingBytes;
+                ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                *pNbRemainingBytes = 0;
+            }
+            else
+            {
+                dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+            }
+            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+            if (dwNbBytesToWrite > 0)
+            {
+                bWriteSuccess = WriteFile(hPipe, pBytesToWrite, dwNbBytesToWrite, &dwNbBytesWritten, NULL);
+                dwNbBytesToWrite = 0;
+                ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+            }
+                
+        } while (dwNbBytesToHold > 0 || dwNbBytesReceived > 0 && bWriteSuccess && !bSwitchMode);
     }
     else
     {
@@ -341,24 +363,87 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char pRemai
                 do
                 {
                     ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
-                    WSAWaitForMultipleEvents(1, &hReadEvent, true, 500, false);
-                    dwBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+                    WSAWaitForMultipleEvents(1, &hReadEvent, true, 100, false);
+                    if (*pNbRemainingBytes > 0)
+                    {
+                        // transfert remaining bytes to pBytesReceived buffer
+                        memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
+                        dwNbBytesReceived = *pNbRemainingBytes;
+                        ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                        *pNbRemainingBytes = 0;
+                        WSASetLastError(0); // clear the last error so that we are sure to get in the next if block that check WSAGetLastError()
+                    }
+                    else
+                    {
+                        dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+                    }
                     // we still check WSAEWOULDBLOCK for a more robust implementation
                     if (WSAGetLastError() != WSAEWOULDBLOCK)
                     {
                         WSAResetEvent(hReadEvent);
                         bSocketBlockingOperation = false;
-                        bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwBytesReceived, &dwBytesWritten, NULL);
+                        bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                            pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                        if (dwNbBytesToWrite > 0)
+                        {
+                            bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwNbBytesReceived, &dwNbBytesWritten, NULL);
+                            dwNbBytesToWrite = 0;
+                            ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+                        }
                     }
                     else
                     {
                         bSocketBlockingOperation = true;
                     }
-                } while (bSocketBlockingOperation || (dwBytesReceived > 0 && bWriteSuccess));
+                } while (bSocketBlockingOperation || dwNbBytesToHold > 0 || (dwNbBytesReceived > 0 && bWriteSuccess && !bSwitchMode));
             }
             WSACloseEvent(hReadEvent);
         }
     }
+
+    delete[] pBytesToHold;
+    delete[] pBytesToWrite;
+
+    return bSwitchMode;
+}
+
+
+bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyControlCode, DWORD dwPtyControlCodeSize,
+    char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes)
+{
+    /* Read the socket and call popen for every line received
+    * When it receive a buffer that contains popen mode control code
+    * It copies the remaining data in pRemainingBytes buffer and return with true
+    */
+    bool bSwitchMode = false;
+
+    char pBytesReceived[BUFFER_SIZE_SOCKET];
+    char* pBytesToHold = new char[BUFFER_SIZE_SOCKET];
+    char* pBytesToWrite = new char[BUFFER_SIZE_SOCKET];
+    DWORD dwNbBytesReceived = 0;
+    DWORD dwNbBytesToHold = 0;
+    DWORD dwNbBytesToWrite = 0;
+    DWORD dwNbBytesSent = 0;
+
+    ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET);
+    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+
+    if (bOverlapped)
+    {
+        do
+        {
+
+        } while (dwNbBytesToHold > 0 || dwNbBytesReceived > 0 && dwNbBytesSent > 0 && !bSwitchMode);
+    }
+    else
+    {
+
+    }
+
+    delete[] pBytesToHold;
+    delete[] pBytesToWrite;
+
+    return bSwitchMode;
 }
 
 
@@ -368,11 +453,40 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
     HANDLE hPipe = pThreadParams->hInPipe;
     SOCKET hSock = pThreadParams->hSock;
     HANDLE hChildProcess = pThreadParams->piInfo.hProcess;
+    HANDLE hBlockWriteSockThread = pThreadParams->hBlockWriteSockThread;
     bool bOverlapped = pThreadParams->bOverlapped;
+    char* pPopenControlCode = pThreadParams->pPopenControlCode;
+    DWORD dwPopenControlCodeSize = (DWORD)min(strlen(pPopenControlCode) - 1, BUFFER_SIZE_SOCKET);
+    char* pPtyControlCode = pThreadParams->pPtyControlCode;
+    DWORD dwPtyControlCodeSize = (DWORD)min(strlen(pPtyControlCode) - 1, BUFFER_SIZE_SOCKET);
     bool bPopenMode = false; // by default we're in pty mode
+    bool bSwitchMode = false; // loop control flag
+    char pRemainingBytes[BUFFER_SIZE_SOCKET];
+    ZeroMemory(pRemainingBytes, BUFFER_SIZE_SOCKET);
+    DWORD dwNbRemainingBytes = 0;
+
+    do
+    {
+        if (bPopenMode)
+        {
+            ResetEvent(hBlockWriteSockThread); // Reset the event to block the ReadPipeWriteSock thread
+            Sleep(1000); // wait at least 1s before reading the child process CWD
+            CString csCwd;
+            bool bRes = GetProcessCwd(pThreadParams->piInfo.dwProcessId, csCwd);
+            SetCurrentDirectory(csCwd);
+            bSwitchMode = ReadSockCallPopen(hSock, hPipe, bOverlapped, pPopenControlCode, dwPopenControlCodeSize,
+                pRemainingBytes, BUFFER_SIZE_SOCKET, &dwNbRemainingBytes);
+            SetEvent(hBlockWriteSockThread); // Signal the event to unblock the ReadPipeWriteSock thread
+        }
+        else
+        {
+            bSwitchMode = ReadSockWritePipe(hSock, hPipe, bOverlapped, pPopenControlCode, dwPopenControlCodeSize, 
+                pRemainingBytes, BUFFER_SIZE_SOCKET, &dwNbRemainingBytes);            
+        }
+        bPopenMode = !bPopenMode;
+    } while (bSwitchMode);
     
-    CString csCwd;
-    bool bRes = GetProcessCwd(pThreadParams->piInfo.dwProcessId, csCwd);
+    
     
     TerminateProcess(hChildProcess, 0);
     return 0;
@@ -384,7 +498,7 @@ HANDLE StartThreadReadSocketWritePipe(CommunicationThreadParams* pParams)
     return hThread;
 }
 
-HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlString, char* pPtyControlString)
+HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode)
 {
     HRESULT hRes = E_FAIL;
     HMODULE hKernel32 = LoadLibrary(_T("kernel32.dll"));
@@ -522,22 +636,6 @@ HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopen
                                 HANDLE hBlockWriteSockThread = CreateEvent(NULL, TRUE, TRUE, NULL); // handle for the read sock thread to block the write sock thread in popen mode
                                 if (hBlockWriteSockThread != NULL && hBlockWriteSockThread != INVALID_HANDLE_VALUE)
                                 {
-                                    size_t sizePopenControlString = strlen(pPopenControlString);
-                                    char* pPopenControlCode = new char[sizePopenControlString + 3];
-                                    ZeroMemory(pPopenControlCode, sizePopenControlString + 3);
-                                    pPopenControlCode[0] = '\x01';
-                                    memcpy(pPopenControlCode + 1, pPopenControlString, sizePopenControlString - 1); // the -1 is to remove the terminal null byte
-                                    pPopenControlCode[sizePopenControlString] = '\r';
-                                    pPopenControlCode[sizePopenControlString + 1] = '\x01';
-                                    //pPopenControlCode[sizePtyControlString + 2] = '\x00';
-                                    size_t sizePtyControlString = strlen(pPtyControlString);
-                                    char* pPtyControlCode = new char[sizePtyControlString + 3];
-                                    ZeroMemory(pPtyControlCode, sizePtyControlString + 3);
-                                    pPtyControlCode[0] = '\x01';
-                                    memcpy(pPtyControlCode + 1, pPtyControlString, sizePtyControlString - 1); // the -1 is to remove the terminal null byte
-                                    pPtyControlCode[sizePtyControlString] = '\r';
-                                    pPtyControlCode[sizePtyControlString + 1] = '\x01';
-                                    //pPtyControlCode[sizePtyControlString + 2] = '\x00';
                                     params.pPopenControlCode = pPopenControlCode;
                                     params.pPtyControlCode = pPtyControlCode;
                                     params.hInPipe = hInputPipeWrite;
