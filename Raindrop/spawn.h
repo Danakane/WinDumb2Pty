@@ -50,11 +50,13 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams);
 HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams);
 
 bool ParseReceivedBytes(char* pBytesReceived, DWORD dwNbBytesReceived, char* pBytesToHold, DWORD* pNbBytesToHold,
-	char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPopenControlCode, DWORD dwPopenControlCodeSize,
+	char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pSwitchModeControlCode, DWORD dwSwitchControlCodeSize,
 	char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes);
 
 bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPopenControlCode, DWORD dwPopenControlCodeSize,
 		char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainBytes);
+
+bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPendingCommand, DWORD* pNbPendingCommandSize, DWORD* pNbBytesSent);
 
 bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyControlCode, DWORD dwPtyControlCodeSize,
 	char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes);

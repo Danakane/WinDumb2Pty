@@ -22,6 +22,7 @@ int main(int argc, char* argv[])
     {
         int iRows = atoi(argv[2]);
         int iCols = atoi(argv[3]);
+        // C:\Users\admin\source\repos\Raindrop\x64\Debug\raindrop.exe powershell 56 156 _popen_ _pty_
         //UnHookDll();
         Sleep(20000);
         iRes = SUCCEEDED(SpawnPty(argv[1], iRows, iCols, argv[4], argv[5])) ? 0 : -1;
