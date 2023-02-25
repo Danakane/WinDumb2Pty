@@ -11,6 +11,10 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 
+#include <fcntl.h>
+#include <io.h>
+#include <cstdio>
+#include <cstring>
 
 #include <winsock2.h>
 #include <WS2tcpip.h>

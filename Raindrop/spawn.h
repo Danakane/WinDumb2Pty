@@ -7,7 +7,6 @@
 
 
 #define BUFFER_SIZE_PIPE 1048576
-
 #define BUFFER_SIZE_SOCKET 8192
 
 DWORD  GetParentProcessId(DWORD dwProcessId = 0);
@@ -15,6 +14,8 @@ DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 HANDLE GetProcessHandle(DWORD dwProcessId);
 
 bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory);
+
+bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, CString& csCurrentWorkingDirectory);
 
 bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite);
 
@@ -45,6 +46,8 @@ typedef struct _CommunicationThreadParams
 	bool bOverlapped;
 } CommunicationThreadParams; 
 
+bool SendAll(SOCKET hSock, const char* pBuffer, DWORD dwLength);
+
 DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams);
 
 HANDLE StartThreadReadPipeWriteSocket(CommunicationThreadParams* pParams);
@@ -56,7 +59,7 @@ bool ParseReceivedBytes(char* pBytesReceived, DWORD dwNbBytesReceived, char* pBy
 bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPopenControlCode, DWORD dwPopenControlCodeSize,
 		char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainBytes);
 
-bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPendingCommand, DWORD* pNbPendingCommandSize, DWORD* pNbBytesSent);
+bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD* pNbBytesToWrite, char* pPendingCommand, DWORD* pNbPendingCommandSize);
 
 bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyControlCode, DWORD dwPtyControlCodeSize,
 	char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes);

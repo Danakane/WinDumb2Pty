@@ -41,6 +41,7 @@ HANDLE GetProcessHandle(DWORD dwProcessId)
 
 bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory)
 {
+    // Unfortunately doesn't work as expected but still pretty cool
     bool bRes = false;
 
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, dwProcessId);
@@ -84,6 +85,62 @@ bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory)
             FreeModule(hNtdll);
         }
         CloseHandle(hProcess);
+    }
+    return bRes;
+}
+
+bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, CString& csCurrentWorkingDirectory)
+{
+    // This is really hackish and may not work if PeekNamedPipe doesn't read all the data
+    // Unfortunately, there is no "non-blocking" IO on pipes like for sockets
+    bool bRes = false;
+    char cmd[] = "cmd /c cd\r";
+    DWORD dwNbBytesWritten = 0;
+    if (WriteFile(hWritePipe, cmd, strlen(cmd), &dwNbBytesWritten, NULL) != FALSE)
+    {
+        Sleep(200);
+        BOOL bPeekSuccess = false;
+        DWORD dwBytesAvailables = 0;
+        bPeekSuccess = PeekNamedPipe(hReadPipe, NULL, 0, NULL, &dwBytesAvailables, NULL);
+        if (bPeekSuccess && dwBytesAvailables > 0)
+        {
+            char* pBuffer = new char[dwBytesAvailables];
+            ZeroMemory(pBuffer, dwBytesAvailables);
+            DWORD dwTotalBytesRead = 0;
+            DWORD dwBytesRead = 0;
+            BOOL bReadSuccess = FALSE;
+            do
+            {
+                dwBytesRead = 0;
+                bReadSuccess = ReadFile(hReadPipe, pBuffer + dwTotalBytesRead, dwBytesAvailables - dwTotalBytesRead, &dwBytesRead, NULL);
+                dwTotalBytesRead += dwBytesRead;
+            } while (dwBytesRead != dwBytesAvailables && bReadSuccess != FALSE);
+            if (bReadSuccess)
+            {
+                char* pStart = pBuffer;
+                char* pEnd = NULL;
+                const char crlf[] = "\r\n";
+                do
+                {
+                    pEnd = strstr(pStart, crlf);
+                    if (pEnd != NULL)
+                    {
+                        size_t length = pEnd - pStart;
+                        CString csCandidate = CString(pStart, length);
+                        DWORD dwAttrib = GetFileAttributes(csCandidate);
+                        if (dwAttrib != INVALID_FILE_ATTRIBUTES &&
+                            (dwAttrib & FILE_ATTRIBUTE_DIRECTORY))
+                        {
+                            csCurrentWorkingDirectory = csCandidate;
+                            bRes = true;
+                        }
+                        else
+                            pStart = pEnd + strlen(crlf);
+                    }
+                } while (pStart != NULL && pEnd != NULL && !bRes);
+            }
+            delete[] pBuffer;
+        }
     }
     return bRes;
 }
@@ -217,6 +274,25 @@ HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csComm
     return hRes;
 }
 
+bool SendAll(SOCKET hSock, const char* pBuffer, DWORD dwLength) {
+    
+    DWORD dwTotalSent = 0;
+
+    while (dwTotalSent < dwLength) {
+        DWORD dwSent = send(hSock, pBuffer + dwTotalSent, dwLength - dwTotalSent, 0);
+        if (dwSent == SOCKET_ERROR) {
+            if (WSAGetLastError() != WSAEWOULDBLOCK)
+                break;
+            else
+                dwSent = 0;
+        }
+        dwTotalSent += dwSent;
+    }
+
+    return dwTotalSent == dwLength;
+}
+
+
 DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
 {
     CommunicationThreadParams* pThreadParams = (CommunicationThreadParams*)lpParams;
@@ -225,7 +301,7 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
     HANDLE  hBlockWriteSockThread = pThreadParams->hBlockWriteSockThread;
     bool bOverlapped = pThreadParams->bOverlapped;
     bool bReadSuccess = false;
-    DWORD dwBytesSent = 0;
+    bool bSendSuccess = 0;
     DWORD dwBytesRead = 0;
     char pBytesToWrite[BUFFER_SIZE_SOCKET];
     do
@@ -234,18 +310,8 @@ DWORD WINAPI ThreadReadPipeWriteSocket(LPVOID lpParams)
         WaitForSingleObject(hBlockWriteSockThread, INFINITE);
         bReadSuccess = ReadFile(hPipe, pBytesToWrite, BUFFER_SIZE_SOCKET, &dwBytesRead, NULL);
         if (bReadSuccess)
-        {
-            if(bOverlapped)
-                dwBytesSent = send(hSock, pBytesToWrite, (int)dwBytesRead, 0);
-            else 
-            {
-                do
-                {
-                    dwBytesSent = send(hSock, pBytesToWrite, (int)dwBytesRead, 0);
-                } while (WSAGetLastError() == WSAEWOULDBLOCK);
-            }
-        }
-    } while (dwBytesSent > 0 && bReadSuccess);
+            bSendSuccess = SendAll(hSock, pBytesToWrite, (int)dwBytesRead);
+    } while (bSendSuccess && bReadSuccess);
     return 0;
 }
 
@@ -328,6 +394,7 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
     {
         do
         {
+            bWriteSuccess = false;
             ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
             if (*pNbRemainingBytes > 0)
             {
@@ -341,13 +408,16 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
             {
                 dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
             }
-            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
-                pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
-            if (dwNbBytesToWrite > 0)
+            if (dwNbBytesReceived != SOCKET_ERROR)
             {
-                bWriteSuccess = WriteFile(hPipe, pBytesToWrite, dwNbBytesToWrite, &dwNbBytesWritten, NULL);
-                dwNbBytesToWrite = 0;
-                ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+                bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                    pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                if (dwNbBytesToWrite > 0)
+                {
+                    bWriteSuccess = WriteFile(hPipe, pBytesToWrite, dwNbBytesToWrite, &dwNbBytesWritten, NULL);
+                    dwNbBytesToWrite = 0;
+                    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+                }
             }
                 
         } while (dwNbBytesReceived > 0          // receiving 0 bytes would mean that the sockeet died
@@ -366,6 +436,7 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
                 bool bSocketBlockingOperation = false;
                 do
                 {
+                    bWriteSuccess = false;
                     ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
                     WSAWaitForMultipleEvents(1, &hReadEvent, true, 100, false);
                     if (*pNbRemainingBytes > 0)
@@ -386,14 +457,17 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
                     {
                         WSAResetEvent(hReadEvent);
                         bSocketBlockingOperation = false;
-                        bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
-                            pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
-                        if (dwNbBytesToWrite > 0)
+                        if (dwNbBytesReceived != SOCKET_ERROR)
                         {
-                            bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwNbBytesReceived, &dwNbBytesWritten, NULL);
-                            dwNbBytesToWrite = 0;
-                            ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
-                        }
+                            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                                pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                            if (dwNbBytesToWrite > 0)
+                            {
+                                bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwNbBytesReceived, &dwNbBytesWritten, NULL);
+                                dwNbBytesToWrite = 0;
+                                ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+                            }
+                        } 
                     }
                     else
                     {
@@ -419,14 +493,13 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
 }
 
 
-bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD *pNbBytesToWrite, char* pPendingCommand, DWORD *pNbPendingCommandSize, DWORD* pNbBytesSent)
+bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD *pNbBytesToWrite, char* pPendingCommand, DWORD *pNbPendingCommandSize)
 {
     bool bRes = true;
     DWORD dwNbBytesToWrite = *pNbBytesToWrite;
     DWORD dwPendingCommandSize = *pNbPendingCommandSize;
-    DWORD dwNbBytesSent = 0;
     char pPopenOutput[BUFFER_SIZE_SOCKET];
-    for (DWORD i = 0; i < dwNbBytesToWrite && dwPendingCommandSize < BUFFER_SIZE_SOCKET - 1; ++i)
+    for (DWORD i = 0; i < dwNbBytesToWrite && dwPendingCommandSize < BUFFER_SIZE_SOCKET - 1 && bRes; ++i)
     {
         // loop stop if dwPendingCommandSize == BUFFER_SIZE_SOCKET - 1 because the last byte of the buffer is reserved for the null byte
         if (pBytesToWrite[i] != '\r')
@@ -442,9 +515,8 @@ bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD *pNbBytesToWrit
             {
                 while (fgets(pPopenOutput, BUFFER_SIZE_SOCKET - 1, pPopen))
                 {
-                    dwNbBytesSent += send(hSock, pPopenOutput, strlen(pPopenOutput), NULL);
+                    bRes &= SendAll(hSock, pPopenOutput, (DWORD)strlen(pPopenOutput));
                     ZeroMemory(pPopenOutput, BUFFER_SIZE_SOCKET);
-                    bRes = (bool)(dwNbBytesSent > 0);
                 }
                 int endOfFileVal = feof(pPopen);
                 int closeReturnVal = _pclose(pPopen);
@@ -467,11 +539,9 @@ bool CallPopenWriteSock(SOCKET hSock, char* pBytesToWrite, DWORD *pNbBytesToWrit
     dwNbBytesToWrite = 0;
     ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
     *pNbBytesToWrite = dwNbBytesToWrite;
-    *pNbBytesSent = dwNbBytesSent;
     *pNbPendingCommandSize = dwPendingCommandSize;
     return bRes;
 }
-
 
 bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyControlCode, DWORD dwPtyControlCodeSize,
     char* pRemainingBytes, DWORD dwRemainingBufferSize, DWORD* pNbRemainingBytes)
@@ -515,12 +585,17 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
             {
                 dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
             }
-            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
-                pPtyControlCode, dwPtyControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
-            if (dwNbBytesToWrite > 0)
+            if (dwNbBytesReceived != SOCKET_ERROR)
             {
-                bStillAlive = CallPopenWriteSock(hSock, pBytesToWrite, &dwNbBytesToWrite, pPendingCommand, &dwPendingCommandSize, &dwNbBytesSent);
+                bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                    pPtyControlCode, dwPtyControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                if (dwNbBytesToWrite > 0)
+                {
+                    bStillAlive = CallPopenWriteSock(hSock, pBytesToWrite, &dwNbBytesToWrite, pPendingCommand, &dwPendingCommandSize);
+                }
             }
+            else
+                bStillAlive = false;
         } while (dwNbBytesReceived > 0                  // receiving 0 data mean that the socket died 
             && !bSwitchMode                             // bSwitchMode == true mean we have to switch to pty mode
             && (bStillAlive                             // we managed to write back data from popen in the socket or the command failed and we didn't check the socket
@@ -558,12 +633,17 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
                     {
                         WSAResetEvent(hReadEvent);
                         bSocketBlockingOperation = false;
-                        bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
-                            pPtyControlCode, dwPtyControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
-                        if (dwNbBytesToWrite > 0)
+                        if (dwNbBytesReceived != SOCKET_ERROR) // otherwise the socket died
                         {
-                            bStillAlive = CallPopenWriteSock(hSock, pBytesToWrite, &dwNbBytesToWrite, pPendingCommand, &dwPendingCommandSize, &dwNbBytesSent);
+                            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                                pPtyControlCode, dwPtyControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                            if (dwNbBytesToWrite > 0)
+                            {
+                                bStillAlive = CallPopenWriteSock(hSock, pBytesToWrite, &dwNbBytesToWrite, pPendingCommand, &dwPendingCommandSize);
+                            }
                         }
+                        else
+                            bStillAlive = false;
                     }
                     else
                     {
@@ -589,7 +669,6 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
     return bSwitchMode;
 }
 
-
 DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
 {
     CommunicationThreadParams* pThreadParams = (CommunicationThreadParams*)lpParams;
@@ -612,11 +691,15 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
     {
         if (bPopenMode)
         {
-            ResetEvent(hBlockWriteSockThread); // Reset the event to block the ReadPipeWriteSock thread
-            Sleep(1000); // wait at least 1s before reading the child process CWD
+            // Reset the event to block the ReadPipeWriteSock thread
+            ResetEvent(hBlockWriteSockThread); 
+            DWORD dwBytesWritten = 0;
+            // Unlock the read-pipe-write-sock thread if it's blocked on the ReadFile of the pipe
+            WriteFile(pThreadParams->hInPipe, "\r", 1, &dwBytesWritten, NULL); 
+            Sleep(200); // wait at least 0.2s before reading the child process CWD
             CString csCwd;
-            bool bRes = GetProcessCwd(pThreadParams->piInfo.dwProcessId, csCwd);
-            SetCurrentDirectory(csCwd);
+            if(GetProcessCwd(pThreadParams->hOutPipe, pThreadParams->hInPipe, csCwd))
+                SetCurrentDirectory(csCwd);
             bSwitchMode = ReadSockCallPopen(hSock, hPipe, bOverlapped, pPtyControlCode, dwPtyControlCodeSize,
                 pRemainingBytes, BUFFER_SIZE_SOCKET, &dwNbRemainingBytes);
             SetEvent(hBlockWriteSockThread); // Signal the event to unblock the ReadPipeWriteSock thread
@@ -781,13 +864,14 @@ HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopen
                                     params.pPtyControlCode = pPtyControlCode;
                                     params.hInPipe = hInputPipeWrite;
                                     params.hOutPipe = hOutputPipeRead;
+                                    params.hBlockWriteSockThread = hBlockWriteSockThread;
                                     params.hSock = hSock;
                                     params.piInfo = childProcessInfo;
                                     params.bOverlapped = bOverlapped;
                                     HANDLE hThreadReadPipeWriteSocket = StartThreadReadPipeWriteSocket(&params);
                                     HANDLE hThreadReadSocketWritePipe = StartThreadReadSocketWritePipe(&params);
                                     char szSuccessMsg[] = "SUCCESS: pty ready!\n";
-                                    send(hSock, szSuccessMsg, (int)strlen(szSuccessMsg), 0);
+                                    SendAll(hSock, szSuccessMsg, (int)strlen(szSuccessMsg));
                                     hRes = S_OK;
                                     // wait for the child process until exit
                                     WaitForSingleObject(childProcessInfo.hProcess, INFINITE);
