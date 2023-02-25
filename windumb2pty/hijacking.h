@@ -108,8 +108,6 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId);
 
 bool IsSocketOverlapped(SOCKET sock);
 
-bool IsSocketInherited(SOCKET hSock, DWORD dwProcessId);
-
 SOCKET DuplicateSocketFromHandle(HANDLE hHandle);
 
 SOCKET_LIST DuplicateSocketsFromHandles(HANDLE_LIST& lstHandles);

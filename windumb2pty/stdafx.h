@@ -19,13 +19,14 @@
 #include <winsock2.h>
 #include <WS2tcpip.h>
 #include <mstcpip.h>
+#include <strsafe.h>
 
 #include <cassert>
-
 #include <list>
 #include <vector>
-#include <iostream>
 
 using namespace std;
+
+
 
 #endif

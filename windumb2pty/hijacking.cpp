@@ -1,3 +1,4 @@
+#include "globals.h"
 #include "hijacking.h"
 
 
@@ -55,7 +56,7 @@ SOCKET_LIST FilterAndOrderSocketsByBytesIn(SOCKET_LIST& lstSocks)
             {
                 closesocket(hSock);
             }
-            catch (const std::system_error& e) 
+            catch(...)
             {
             }
         }
@@ -124,7 +125,7 @@ SOCKET DuplicateSocketFromHandle(HANDLE hHandle)
             {
                 CloseHandle(hHandle); // cleaning 
             }
-            catch (const std::system_error& e)
+            catch (...)
             {
             }
         }
@@ -196,7 +197,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
     hTargetProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, dwProcessId);
     if (hTargetProcess == NULL)
     {
-        cerr << "Cannot open target process with pid " << dwProcessId << " for DuplicateHandle access" << endl;
+        WriteStdErr("ERROR: Cannot open target process for DuplicateHandle access\r\n");
     }
     else
     {
@@ -211,7 +212,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
             NtQuerySystemInformationPtr NtQuerySystemInformation = (NtQuerySystemInformationPtr)GetProcAddress(hModule, "NtQuerySystemInformation");
             if (NULL == NtQuerySystemInformation)
             {
-                cerr << "GetProcAddress failed for NtQuerySystemInformation" << endl;
+                WriteStdErr("ERROR: GetProcAddress failed for NtQuerySystemInformation\r\n");
             }
             else
             {
@@ -221,7 +222,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                     delete pSysHandleInformation;
                     if (0 == needed)
                     {
-                        cerr << "NtQuerySystemInformatio failed" << endl;
+                        WriteStdErr("ERROR: NtQuerySystemInformatino failed\r\n");
                     }
                     else
                     {
@@ -297,7 +298,7 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
         }
         else
         {
-            cerr << "Failed to get module ntdll.dll" << endl;
+            WriteStdErr("ERROR: Failed to get module ntdll.dll\r\n");
         }
     }
     return lstSocks;
@@ -345,33 +346,6 @@ bool IsSocketOverlapped(SOCKET hSock)
     return bRes;
 }
 
-bool IsSocketInherited(SOCKET hSock, DWORD dwProcessId)
-{
-    bool bInherited = false;
-    SOCKET_LIST lstParentSocks = GetTargetProcessSockets(dwProcessId);
-    if (lstParentSocks.size() > 0)
-    {
-        for(auto it = lstParentSocks.begin(); it != lstParentSocks.end(); ++it)
-        {
-            SOCKET hParentSock = *it;
-            SOCKADDR_IN sockaddrTargetProcess = { 0 };
-            SOCKADDR_IN sockaddrParentProcess = { 0 };
-            int iSockAddrTargetProcessLen = sizeof(sockaddrTargetProcess), iSockAddrParentProcessLen = sizeof(sockaddrParentProcess);
-            if (
-                (getpeername(hSock, (sockaddr*)&sockaddrTargetProcess, &iSockAddrTargetProcessLen) == 0) &&
-                (getpeername(hParentSock, (sockaddr*)&sockaddrParentProcess, &iSockAddrParentProcessLen) == 0) &&
-                (sockaddrTargetProcess.sin_addr.S_un.S_addr == sockaddrParentProcess.sin_addr.S_un.S_addr && 
-                    sockaddrTargetProcess.sin_port == sockaddrParentProcess.sin_port)
-                )
-            {
-                bInherited = true;
-            }
-            closesocket(hParentSock);
-        }
-    }
-    return bInherited;
-}
-
 SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket)
 {
     bOverlappedSocket = false;
@@ -393,7 +367,7 @@ SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket)
         // no Overlapped sockets found, We try with the first socket
         if (hSock == INVALID_SOCKET) 
         {
-            cerr << "debug: No overlapped sockets found. Trying to return also non-overlapped sockets..." << endl;
+            WriteStdErr("DEBUG: No overlapped sockets found. Trying to return also non-overlapped sockets...\r\n");
             hSock = lstSocks.front();
         }
         // close duplicated socket handle not returned to avoid leaking handles.
@@ -411,6 +385,6 @@ bool SetSocketBlockingMode(SOCKET hSock, int iMode)
     ULONG ulNonBlocking = iMode == 1 ? 1 : 0;
     int iResult = ioctlsocket(hSock, FIONBIO, &ulNonBlocking);
     if (iResult != 0)
-        cerr << _T("ioctlsocket failed with return code ") << iResult << _T(" and wsalasterror: ") << WSAGetLastError() << endl;
+        WriteStdErr("ERROR: ioctlsocket failed\r\n");
     return iResult == 0;
 }
