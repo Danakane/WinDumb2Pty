@@ -5,17 +5,13 @@ It is based on [antonioCoco's ConPtyShell PoC](https://github.com/antonioCoco/Co
 
 ## Usage
 
-Usage: **windump2pty.exe** *PROGRAM ROWS COLS POPENMODECODE PTYMODECODE*
+Usage: `windump2pty.exe PROGRAM ROWS COLS POPENMODECODE PTYMODECODE`
 
-PROGRAM: Path of the program to start in the pty console
-
-COLS: number of column for the pty console
-
-ROWS: number of rows for the pty console
-
-POPENMODECODE: control code to receive in order to switch to popen mode
-
-PTYMODECODE: control code to receive in order to switch to pty mode
+* `PROGRAM`: Path of the program to start in the pty console
+* `COLS`: number of column for the pty console
+* `ROWS`: number of rows for the pty console
+* `POPENMODECODE`: control code to receive in order to switch to popen mode
+* `PTYMODECODE`: control code to receive in order to switch to pty mode
 
 
 ## features
