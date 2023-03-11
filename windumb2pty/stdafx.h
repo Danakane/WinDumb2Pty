@@ -6,7 +6,6 @@
 
 #include <windows.h>
 #include <tchar.h>
-#include <atlstr.h>
 #include <processthreadsapi.h>
 #include <tlhelp32.h>
 #include <psapi.h>

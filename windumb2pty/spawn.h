@@ -15,9 +15,7 @@ DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 
 HANDLE GetProcessHandle(DWORD dwProcessId);
 
-bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory);
-
-bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, CString& csCurrentWorkingDirectory);
+bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, char** ppCurrentWorkingDirectory);
 
 bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite);
 
@@ -29,11 +27,11 @@ bool EnableVirtualTerminalSequenceProcessing();
 
 HRESULT CreatePseudoConsoleWithPipes(HANDLE hConPtyInputPipeRead, HANDLE hConPtyOutputPipeWrite, UINT uiRows, UINT uiCols, OUT HPCON* phPseudoConsole);
 
-HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEX* pStartupInfo);
+HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEXA* pStartupInfo);
 
-HRESULT RunProcess(STARTUPINFOEX& startupInfo, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
+HRESULT RunProcess(STARTUPINFOEXA& startupInfo, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
 
-HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
+HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
 
 
 typedef struct _CommunicationThreadParams
@@ -78,7 +76,7 @@ typedef NTSTATUS(NTAPI* NtResumeProcessPtr)(
 	HANDLE	ProcessHandle
 );
 
-HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode);
+HRESULT SpawnPty(const char* tcsCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode);
 
 void CleanUp();
 

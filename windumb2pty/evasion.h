@@ -4,6 +4,6 @@
 
 #include "stdafx.h"
 
-int UnHookDll(CString module = _T("ntdll.dll"), CString path = _T("c:\\windows\\system32\\ntdll.dll"));
+int UnHookDll(const TCHAR* tcsModule, const TCHAR* tcsPath);
 
 #endif

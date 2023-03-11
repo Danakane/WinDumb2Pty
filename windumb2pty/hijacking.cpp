@@ -19,20 +19,29 @@ bool IsSocketHandle(HANDLE hHandle)
             NtStatus = NtQueryObject(hHandle, ObjectTypeInformation, TypeInfo, InSize, &OutSize);
             if (NT_SUCCESS(NtStatus))
             {
-                if (0 == wcscmp(_T("File"), CString(TypeInfo->TypeName.Buffer, TypeInfo->TypeName.Length).GetBuffer()))
+                wchar_t* wcsTypeName = (wchar_t*)malloc(TypeInfo->TypeName.Length + 2); // TypeInfo->TypeName.Length is in number of bytes
+                ASSERT(wcsTypeName != NULL); // NULL => not enough memory space
+                if (wcsTypeName != NULL) // this just to remove the warning
                 {
-                    NtStatus = NtQueryObject(hHandle, ObjectNameInformation, NULL, 0, &OutSize);
-                    buffer = vector<BYTE>(OutSize);
-                    PPUBLIC_OBJECT_NAME_INFORMATION NameInfo = (PPUBLIC_OBJECT_NAME_INFORMATION)&buffer[0];
-                    InSize = OutSize;
-                    NtStatus = NtQueryObject(hHandle, ObjectNameInformation, NameInfo, InSize, &OutSize);
-                    if (NT_SUCCESS(NtStatus))
+                    ZeroMemory(wcsTypeName, TypeInfo->TypeName.Length + 2);
+                    memcpy(wcsTypeName, TypeInfo->TypeName.Buffer, TypeInfo->TypeName.Length);
+                    if (0 == wcscmp(L"File", wcsTypeName))
                     {
-                        if (0 == wcscmp(_T("\\Device\\Afd"), NameInfo->Name.Buffer))
+                        NtStatus = NtQueryObject(hHandle, ObjectNameInformation, NULL, 0, &OutSize);
+                        buffer = vector<BYTE>(OutSize);
+                        PPUBLIC_OBJECT_NAME_INFORMATION NameInfo = (PPUBLIC_OBJECT_NAME_INFORMATION)&buffer[0];
+                        InSize = OutSize;
+                        NtStatus = NtQueryObject(hHandle, ObjectNameInformation, NameInfo, InSize, &OutSize);
+                        if (NT_SUCCESS(NtStatus))
                         {
-                            bRes = true;
+                            if (0 == wcscmp(L"\\Device\\Afd", NameInfo->Name.Buffer))
+                            {
+                                bRes = true;
+                            }
                         }
                     }
+                    free(wcsTypeName);
+                    wcsTypeName = NULL;
                 }
             }
         }
@@ -262,9 +271,10 @@ SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId)
                                     SetEvent(ThreadParams.hStartEvent);
                                     if (WAIT_TIMEOUT == WaitForSingleObject(ThreadParams.hFinishedEvent, 100))
                                     {
-                                        CString csError;
-                                        csError.Format(L"Query hang for handle %p", hCurrentHandle);
-                                        OutputDebugString(csError);
+                                        char csError[256];
+                                        ZeroMemory(csError, 256);
+                                        sprintf_s(csError, "Query hang for handle %p", hCurrentHandle);
+                                        WriteStdErr(csError);
                                         TerminateThread(hThread, 0);
                                         CloseHandle(hThread);
                                         hThread = NULL;

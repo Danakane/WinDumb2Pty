@@ -40,57 +40,7 @@ HANDLE GetProcessHandle(DWORD dwProcessId)
     return hProcess;
 }
 
-bool GetProcessCwd(DWORD dwProcessId, CString& csCurrentWorkingDirectory)
-{
-    // Unfortunately doesn't work as expected but still pretty cool
-    bool bRes = false;
-
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, dwProcessId);
-    if (hProcess != INVALID_HANDLE_VALUE && hProcess != NULL)
-    {
-        // Load NTDLL library and get NtQueryInformationProcess function pointer
-        HMODULE hNtdll = LoadLibrary(L"ntdll.dll");
-        if (hNtdll != NULL)
-        {
-            NtQueryInformationProcessPtr NtQueryInformationProcess = (NtQueryInformationProcessPtr)GetProcAddress(hNtdll, "NtQueryInformationProcess");
-            if (NtQueryInformationProcess != NULL)
-            {
-                PROCESS_BASIC_INFORMATION basicInfo;
-                ULONG ulReturnLength;
-                NTSTATUS ntStatus = NtQueryInformationProcess(hProcess, ProcessBasicInformation, &basicInfo, sizeof(basicInfo), &ulReturnLength);
-                if (NT_SUCCESS(ntStatus))
-                {
-                    // Read PEB structure from child process memory
-                    PEB peb;
-                    SIZE_T bytesRead;
-                    if (ReadProcessMemory(hProcess, basicInfo.PebBaseAddress, &peb, sizeof(peb), &bytesRead))
-                    {
-                        // Read RTL_USER_PROCESS_PARAMETERS structure from child process memory
-                        RTL_USER_PROCESS_PARAMETERS processParams;
-                        if (ReadProcessMemory(hProcess, peb.ProcessParameters, &processParams, sizeof(processParams), &bytesRead))
-                        {
-                            // Copy current directory path to output string
-                            PVOID pBuf = processParams.CurrentDirectoryPath.Buffer;
-                            USHORT uLength = processParams.CurrentDirectoryPath.Length;
-                            wchar_t* pPath = new wchar_t[uLength / 2 + 1];
-                            ZeroMemory(pPath, sizeof(wchar_t) * (uLength / 2 + 1));
-                            SIZE_T nRead = 0;
-                            ReadProcessMemory(hProcess, pBuf, pPath, uLength, &nRead);
-                            csCurrentWorkingDirectory = CString(pPath, uLength);
-                            bRes = true;
-                            delete[] pPath;
-                        }
-                    }
-                }
-            }
-            FreeModule(hNtdll);
-        }
-        CloseHandle(hProcess);
-    }
-    return bRes;
-}
-
-bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, CString& csCurrentWorkingDirectory)
+bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, char** ppCurrentWorkingDirectory)
 {
     // This is really hackish and may not work if PeekNamedPipe doesn't read all the data
     // Unfortunately, there is no "non-blocking" IO on pipes like for sockets
@@ -127,16 +77,26 @@ bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, CString& csCurrentWorkin
                     if (pEnd != NULL)
                     {
                         size_t length = pEnd - pStart;
-                        CString csCandidate = CString(pStart, (int)length);
-                        DWORD dwAttrib = GetFileAttributes(csCandidate);
-                        if (dwAttrib != INVALID_FILE_ATTRIBUTES &&
-                            (dwAttrib & FILE_ATTRIBUTE_DIRECTORY))
+                        char* csCandidate = (char*)malloc((length + 1) * sizeof(char));
+                        ASSERT(csCandidate != NULL);
+                        if (csCandidate != NULL) // this is just to remove the warning
                         {
-                            csCurrentWorkingDirectory = csCandidate;
-                            bRes = true;
+                            ZeroMemory(csCandidate, (length + 1) * sizeof(char));
+                            memcpy(csCandidate, pStart, length * sizeof(char));
+                            DWORD dwAttrib = GetFileAttributesA(csCandidate);
+                            if (dwAttrib != INVALID_FILE_ATTRIBUTES &&
+                                (dwAttrib & FILE_ATTRIBUTE_DIRECTORY))
+                            {
+                                *ppCurrentWorkingDirectory = csCandidate;
+                                bRes = true;
+                            }
+                            else
+                            {
+                                free(csCandidate);
+                                csCandidate = NULL;
+                                pStart = pEnd + strlen(crlf);
+                            }
                         }
-                        else
-                            pStart = pEnd + strlen(crlf);
                     }
                 } while (pStart != NULL && pEnd != NULL && !bRes);
             }
@@ -204,14 +164,14 @@ HRESULT CreatePseudoConsoleWithPipes(HANDLE hConPtyInputPipeRead, HANDLE hConPty
     return hRes;
 }
 
-HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEX* pStartupInfo)
+HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEXA* pStartupInfo)
 {
     HRESULT hRes = E_FAIL;
     SIZE_T pSize = NULL;
     BOOL bSuccess = InitializeProcThreadAttributeList(NULL, 1, 0, &pSize);
     if (pSize != NULL)
     {
-        pStartupInfo->StartupInfo.cb = sizeof(STARTUPINFOEX);
+        pStartupInfo->StartupInfo.cb = sizeof(STARTUPINFOEXA);
         pStartupInfo->lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(
             GetProcessHeap(),
             0,
@@ -238,7 +198,7 @@ HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT 
     return hRes;
 }
 
-HRESULT RunProcess(STARTUPINFOEX& startupInfo, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
+HRESULT RunProcess(STARTUPINFOEXA& startupInfo, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
 {
     HRESULT hRes = E_FAIL;
     SECURITY_ATTRIBUTES processSec = { 0 };
@@ -246,26 +206,26 @@ HRESULT RunProcess(STARTUPINFOEX& startupInfo, CString csCommandLine, OUT PROCES
     processSec.nLength = iSecurityAttributeSize;
     SECURITY_ATTRIBUTES secAttributes = { 0 };
     secAttributes.nLength = iSecurityAttributeSize;
-    const size_t charsRequired = csCommandLine.GetLength() + 1; // +1 null terminator
-    TCHAR* tcsCmdLineMutable = (TCHAR*)HeapAlloc(GetProcessHeap(), 0, sizeof(TCHAR) * charsRequired);
+    const size_t charsRequired = strlen(csCommandLine) + 1; // +1 null terminator
+    char* csCmdLineMutable = (char*)HeapAlloc(GetProcessHeap(), 0, sizeof(char) * charsRequired);
 
-    if (tcsCmdLineMutable)
+    if (csCmdLineMutable)
     {
-        _tcsncpy_s(tcsCmdLineMutable, charsRequired, csCommandLine.GetBuffer(), csCommandLine.GetLength());
+        strncpy_s(csCmdLineMutable, charsRequired, csCommandLine, charsRequired - 1);
 
-        if (CreateProcess(NULL, tcsCmdLineMutable, &processSec, &secAttributes, FALSE,
+        if (CreateProcessA(NULL, csCmdLineMutable, &processSec, &secAttributes, FALSE,
             EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startupInfo.StartupInfo, pProcessInfo))
             hRes = S_OK;
         else
             WriteStdErr("Could not create process.\r\n");
-        HeapFree(GetProcessHeap(), 0, tcsCmdLineMutable);
+        HeapFree(GetProcessHeap(), 0, csCmdLineMutable);
     }
     return hRes;
 }
 
-HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, CString csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
+HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
 {
-    STARTUPINFOEX startupInfo = { 0 };
+    STARTUPINFOEXA startupInfo = { 0 };
     HRESULT hRes = ConfigureProcessThread(hPseudoConsole, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, &startupInfo);
     if (SUCCEEDED(hRes))
     {
@@ -698,9 +658,12 @@ DWORD WINAPI ThreadReadSocketWritePipe(LPVOID lpParams)
             // Unlock the read-pipe-write-sock thread if it's blocked on the ReadFile of the pipe
             WriteFile(pThreadParams->hInPipe, "\r", 1, &dwBytesWritten, NULL); 
             Sleep(200); // wait at least 0.2s before reading the child process CWD
-            CString csCwd;
-            if(GetProcessCwd(pThreadParams->hOutPipe, pThreadParams->hInPipe, csCwd))
-                SetCurrentDirectory(csCwd);
+            char* csCwd = NULL;
+            if (GetProcessCwd(pThreadParams->hOutPipe, pThreadParams->hInPipe, &csCwd))
+            {
+                SetCurrentDirectoryA(csCwd);
+                free(csCwd);
+            }
             bSwitchMode = ReadSockCallPopen(hSock, hPipe, bOverlapped, pPtyControlCode, dwPtyControlCodeSize,
                 pRemainingBytes, BUFFER_SIZE_SOCKET, &dwNbRemainingBytes);
             SetEvent(hBlockWriteSockThread); // Signal the event to unblock the ReadPipeWriteSock thread
@@ -723,7 +686,7 @@ HANDLE StartThreadReadSocketWritePipe(CommunicationThreadParams* pParams)
     return hThread;
 }
 
-HRESULT SpawnPty(CString csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode)
+HRESULT SpawnPty(const char* csCommandLine, DWORD dwRows, DWORD dwCols, char* pPopenControlCode, char* pPtyControlCode)
 {
     HRESULT hRes = E_FAIL;
     HMODULE hKernel32 = LoadLibrary(_T("kernel32.dll"));

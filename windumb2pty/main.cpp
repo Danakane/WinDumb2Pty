@@ -9,7 +9,7 @@ int main(int argc, char* argv[])
     {
         int iRows = atoi(argv[2]);
         int iCols = atoi(argv[3]);
-        UnHookDll();
+        UnHookDll(_T("ntdll.dll"), _T("c:\\windows\\system32\\ntdll.dll"));
         iRes = SUCCEEDED(SpawnPty(argv[1], iRows, iCols, argv[4], argv[5])) ? 0 : -1;
         CleanUp();
     }

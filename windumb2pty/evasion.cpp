@@ -1,15 +1,16 @@
 #include "evasion.h"
 
-int UnHookDll(CString module, CString path)
+int UnHookDll(const TCHAR* tcsModule, const TCHAR* tcsPath)
 {
 	HANDLE process = GetCurrentProcess();
-	MODULEINFO mi = {};
-	HMODULE ntdllModule = LoadLibrary(module); //"ntdll.dll"
+	MODULEINFO mi;
+	ZeroMemory(&mi, sizeof(MODULEINFO));
+	HMODULE ntdllModule = LoadLibrary(tcsModule); //"ntdll.dll"
 	if (ntdllModule != NULL)
 	{
 		GetModuleInformation(process, ntdllModule, &mi, sizeof(mi));
 		LPVOID ntdllBase = (LPVOID)mi.lpBaseOfDll;
-		HANDLE ntdllFile = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+		HANDLE ntdllFile = CreateFile(tcsPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
 		HANDLE ntdllMapping = CreateFileMapping(ntdllFile, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL);
 		if (ntdllMapping != NULL)
 		{
@@ -22,9 +23,9 @@ int UnHookDll(CString module, CString path)
 
 				if (!strcmp((char*)hookedSectionHeader->Name, (char*)".text")) {
 					DWORD oldProtection = 0;
-					bool isProtected = VirtualProtect((LPVOID)((DWORD_PTR)ntdllBase + (DWORD_PTR)hookedSectionHeader->VirtualAddress), hookedSectionHeader->Misc.VirtualSize, PAGE_EXECUTE_READWRITE, &oldProtection);
+					bool bIsProtected = VirtualProtect((LPVOID)((DWORD_PTR)ntdllBase + (DWORD_PTR)hookedSectionHeader->VirtualAddress), hookedSectionHeader->Misc.VirtualSize, PAGE_EXECUTE_READWRITE, &oldProtection);
 					memcpy((LPVOID)((DWORD_PTR)ntdllBase + (DWORD_PTR)hookedSectionHeader->VirtualAddress), (LPVOID)((DWORD_PTR)ntdllMappingAddress + (DWORD_PTR)hookedSectionHeader->VirtualAddress), hookedSectionHeader->Misc.VirtualSize);
-					isProtected = VirtualProtect((LPVOID)((DWORD_PTR)ntdllBase + (DWORD_PTR)hookedSectionHeader->VirtualAddress), hookedSectionHeader->Misc.VirtualSize, oldProtection, &oldProtection);
+					bIsProtected = VirtualProtect((LPVOID)((DWORD_PTR)ntdllBase + (DWORD_PTR)hookedSectionHeader->VirtualAddress), hookedSectionHeader->Misc.VirtualSize, oldProtection, &oldProtection);
 				}
 			}
 			CloseHandle(ntdllMapping);
