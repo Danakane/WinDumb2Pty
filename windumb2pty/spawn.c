@@ -55,73 +55,76 @@ bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, char** ppCurrentWorkingD
         bPeekSuccess = PeekNamedPipe(hReadPipe, NULL, 0, NULL, &dwBytesAvailables, NULL);
         if (bPeekSuccess && dwBytesAvailables > 0)
         {
-            char* pBuffer = new char[dwBytesAvailables];
-            ZeroMemory(pBuffer, dwBytesAvailables);
-            DWORD dwTotalBytesRead = 0;
-            DWORD dwBytesRead = 0;
-            BOOL bReadSuccess = FALSE;
-            do
+            char* pBuffer = (char*) malloc(dwBytesAvailables * sizeof(char));
+            if (pBuffer != NULL)
             {
-                dwBytesRead = 0;
-                bReadSuccess = ReadFile(hReadPipe, pBuffer + dwTotalBytesRead, dwBytesAvailables - dwTotalBytesRead, &dwBytesRead, NULL);
-                dwTotalBytesRead += dwBytesRead;
-            } while (dwBytesRead != dwBytesAvailables && bReadSuccess != FALSE);
-            if (bReadSuccess)
-            {
-                char* pStart = pBuffer;
-                char* pEnd = NULL;
-                const char crlf[] = "\r\n";
+                ZeroMemory(pBuffer, dwBytesAvailables);
+                DWORD dwTotalBytesRead = 0;
+                DWORD dwBytesRead = 0;
+                BOOL bReadSuccess = FALSE;
                 do
                 {
-                    pEnd = strstr(pStart, crlf);
-                    if (pEnd != NULL)
+                    dwBytesRead = 0;
+                    bReadSuccess = ReadFile(hReadPipe, pBuffer + dwTotalBytesRead, dwBytesAvailables - dwTotalBytesRead, &dwBytesRead, NULL);
+                    dwTotalBytesRead += dwBytesRead;
+                } while (dwBytesRead != dwBytesAvailables && bReadSuccess != FALSE);
+                if (bReadSuccess)
+                {
+                    char* pStart = pBuffer;
+                    char* pEnd = NULL;
+                    const char crlf[] = "\r\n";
+                    do
                     {
-                        size_t length = pEnd - pStart;
-                        char* csCandidate = (char*)malloc((length + 1) * sizeof(char));
-                        ASSERT(csCandidate != NULL);
-                        if (csCandidate != NULL) // this is just to remove the warning
+                        pEnd = strstr(pStart, crlf);
+                        if (pEnd != NULL)
                         {
-                            ZeroMemory(csCandidate, (length + 1) * sizeof(char));
-                            memcpy(csCandidate, pStart, length * sizeof(char));
-                            DWORD dwAttrib = GetFileAttributesA(csCandidate);
-                            if (dwAttrib != INVALID_FILE_ATTRIBUTES &&
-                                (dwAttrib & FILE_ATTRIBUTE_DIRECTORY))
+                            size_t length = pEnd - pStart;
+                            char* csCandidate = (char*)malloc((length + 1) * sizeof(char));
+                            ASSERT(csCandidate != NULL);
+                            if (csCandidate != NULL) // this is just to remove the warning
                             {
-                                *ppCurrentWorkingDirectory = csCandidate;
-                                bRes = true;
-                            }
-                            else
-                            {
-                                free(csCandidate);
-                                csCandidate = NULL;
-                                pStart = pEnd + strlen(crlf);
+                                ZeroMemory(csCandidate, (length + 1) * sizeof(char));
+                                memcpy(csCandidate, pStart, length * sizeof(char));
+                                DWORD dwAttrib = GetFileAttributesA(csCandidate);
+                                if (dwAttrib != INVALID_FILE_ATTRIBUTES &&
+                                    (dwAttrib & FILE_ATTRIBUTE_DIRECTORY))
+                                {
+                                    *ppCurrentWorkingDirectory = csCandidate;
+                                    bRes = true;
+                                }
+                                else
+                                {
+                                    free(csCandidate);
+                                    csCandidate = NULL;
+                                    pStart = pEnd + strlen(crlf);
+                                }
                             }
                         }
-                    }
-                } while (pStart != NULL && pEnd != NULL && !bRes);
+                    } while (pStart != NULL && pEnd != NULL && !bRes);
+                }
+                free(pBuffer);
             }
-            delete[] pBuffer;
         }
     }
     return bRes;
 }
 
-bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite)
+bool CreatePipes(OUT HANDLE* pInputPipeRead, OUT HANDLE* pInputPipeWrite, OUT HANDLE* pOutputPipeRead, OUT HANDLE* pOutputPipeWrite)
 {
     // Create the in/out pipes:
     SECURITY_ATTRIBUTES sec;
     memset(&sec, 0, sizeof(SECURITY_ATTRIBUTES));
     sec.bInheritHandle = 1;
     sec.lpSecurityDescriptor = NULL;
-    return (CreatePipe(&hInputPipeRead, &hInputPipeWrite, &sec, BUFFER_SIZE_PIPE) &&
-        CreatePipe(&hOutputPipeRead, &hOutputPipeWrite, &sec, BUFFER_SIZE_PIPE) == TRUE);
+    return (CreatePipe(pInputPipeRead, pInputPipeWrite, &sec, BUFFER_SIZE_PIPE) &&
+        CreatePipe(pOutputPipeRead, pOutputPipeWrite, &sec, BUFFER_SIZE_PIPE) == TRUE);
 }
 
-void InitConsole(HANDLE& hOldStdIn, HANDLE& hOldStdOut, HANDLE& hOldStdErr)
+void InitConsole(OUT HANDLE* pOldStdIn, OUT HANDLE* pOldStdOut, OUT HANDLE* pOldStdErr)
 {
-    hOldStdIn = GetStdHandle(STD_INPUT_HANDLE);
-    hOldStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    hOldStdErr = GetStdHandle(STD_ERROR_HANDLE);
+    *pOldStdIn = GetStdHandle(STD_INPUT_HANDLE);
+    *pOldStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    *pOldStdErr = GetStdHandle(STD_ERROR_HANDLE);
     HANDLE hStdout = CreateFile(_T("CONOUT$"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     HANDLE hStdin = CreateFile(_T("CONIN$"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
@@ -167,17 +170,17 @@ HRESULT CreatePseudoConsoleWithPipes(HANDLE hConPtyInputPipeRead, HANDLE hConPty
 HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEXA* pStartupInfo)
 {
     HRESULT hRes = E_FAIL;
-    SIZE_T pSize = NULL;
-    BOOL bSuccess = InitializeProcThreadAttributeList(NULL, 1, 0, &pSize);
-    if (pSize != NULL)
+    SIZE_T Size = 0;
+    BOOL bSuccess = InitializeProcThreadAttributeList(NULL, 1, 0, &Size);
+    if (Size != 0)
     {
         pStartupInfo->StartupInfo.cb = sizeof(STARTUPINFOEXA);
         pStartupInfo->lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(
             GetProcessHeap(),
             0,
-            pSize
+            Size
         );
-        if (InitializeProcThreadAttributeList(pStartupInfo->lpAttributeList, 1, 0, &pSize) == TRUE)
+        if (InitializeProcThreadAttributeList(pStartupInfo->lpAttributeList, 1, 0, &Size) == TRUE)
         {
             if (UpdateProcThreadAttribute(pStartupInfo->lpAttributeList, 0, pAttributes, hPseudoConsole, sizeof(hPseudoConsole), NULL, NULL) == TRUE)
             {
@@ -198,7 +201,7 @@ HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT 
     return hRes;
 }
 
-HRESULT RunProcess(STARTUPINFOEXA& startupInfo, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
+HRESULT RunProcess(IN STARTUPINFOEXA* startupInfo, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo)
 {
     HRESULT hRes = E_FAIL;
     SECURITY_ATTRIBUTES processSec = { 0 };
@@ -214,7 +217,7 @@ HRESULT RunProcess(STARTUPINFOEXA& startupInfo, const char* csCommandLine, OUT P
         strncpy_s(csCmdLineMutable, charsRequired, csCommandLine, charsRequired - 1);
 
         if (CreateProcessA(NULL, csCmdLineMutable, &processSec, &secAttributes, FALSE,
-            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startupInfo.StartupInfo, pProcessInfo))
+            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &(startupInfo->StartupInfo), pProcessInfo))
             hRes = S_OK;
         else
             WriteStdErr("Could not create process.\r\n");
@@ -229,7 +232,7 @@ HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, const char* cs
     HRESULT hRes = ConfigureProcessThread(hPseudoConsole, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, &startupInfo);
     if (SUCCEEDED(hRes))
     {
-        hRes = RunProcess(startupInfo, csCommandLine, pProcessInfo);
+        hRes = RunProcess(&startupInfo, csCommandLine, pProcessInfo);
         HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList); // free memory allocated by ConfigureProcessThread
     }
     return hRes;
@@ -341,115 +344,117 @@ bool ReadSockWritePipe(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char *pPope
 
     bool bWriteSuccess = false;
     char pBytesReceived[BUFFER_SIZE_SOCKET];
-    char *pBytesToHold = new char[BUFFER_SIZE_SOCKET];
-    char *pBytesToWrite = new char[BUFFER_SIZE_SOCKET];
-    DWORD dwNbBytesReceived = 0;
-    DWORD dwNbBytesWritten = 0;
-    DWORD dwNbBytesToHold = 0;
-    DWORD dwNbBytesToWrite = 0;
-
-    ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET);
-    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
-
-    if (bOverlapped)
+    char *pBytesToHold = (char*)malloc(BUFFER_SIZE_SOCKET * sizeof(char));
+    char *pBytesToWrite = (char*)malloc(BUFFER_SIZE_SOCKET * sizeof(char));
+    if (pBytesToHold != NULL && pBytesToWrite != NULL)
     {
-        do
+        DWORD dwNbBytesReceived = 0;
+        DWORD dwNbBytesWritten = 0;
+        DWORD dwNbBytesToHold = 0;
+        DWORD dwNbBytesToWrite = 0;
+
+        ZeroMemory(pBytesToHold, BUFFER_SIZE_SOCKET);
+        ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+
+        if (bOverlapped)
         {
-            bWriteSuccess = false;
-            ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
-            if (*pNbRemainingBytes > 0)
+            do
             {
-                // transfert remaining bytes to pBytesReceived buffer
-                memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
-                dwNbBytesReceived = *pNbRemainingBytes;
-                ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
-                *pNbRemainingBytes = 0;
-            }
-            else
-            {
-                dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
-            }
-            if (dwNbBytesReceived != SOCKET_ERROR)
-            {
-                bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
-                    pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
-                if (dwNbBytesToWrite > 0)
+                bWriteSuccess = false;
+                ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
+                if (*pNbRemainingBytes > 0)
                 {
-                    bWriteSuccess = WriteFile(hPipe, pBytesToWrite, dwNbBytesToWrite, &dwNbBytesWritten, NULL);
-                    dwNbBytesToWrite = 0;
-                    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+                    // transfert remaining bytes to pBytesReceived buffer
+                    memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
+                    dwNbBytesReceived = *pNbRemainingBytes;
+                    ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                    *pNbRemainingBytes = 0;
                 }
-            }
-                
-        } while (dwNbBytesReceived > 0          // receiving 0 bytes would mean that the sockeet died
-            && !bSwitchMode                     // non switch mode command
-            && (bWriteSuccess                   // we managed to write to the pipe
-                || dwNbBytesToHold > 0));       // we are waiting for a potential switch mode command
-    }
-    else
-    {
-        HANDLE hReadEvent = WSACreateEvent();
-        if (hReadEvent != NULL && hReadEvent != INVALID_HANDLE_VALUE)
-        {
-            // we expect the socket to be non-blocking at this point. we create an asynch event to be signaled when the recv operation is ready to get some data
-            if (WSAEventSelect(hSock, hReadEvent, FD_READ) == 0)
-            {
-                bool bSocketBlockingOperation = false;
-                do
+                else
                 {
-                    bWriteSuccess = false;
-                    ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
-                    WSAWaitForMultipleEvents(1, &hReadEvent, true, 100, false);
-                    if (*pNbRemainingBytes > 0)
+                    dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+                }
+                if (dwNbBytesReceived != SOCKET_ERROR)
+                {
+                    bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                        pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                    if (dwNbBytesToWrite > 0)
                     {
-                        // transfert remaining bytes to pBytesReceived buffer
-                        memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
-                        dwNbBytesReceived = *pNbRemainingBytes;
-                        ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
-                        *pNbRemainingBytes = 0;
-                        WSASetLastError(0); // clear the last error so that we are sure to get in the next if block that check WSAGetLastError()
+                        bWriteSuccess = WriteFile(hPipe, pBytesToWrite, dwNbBytesToWrite, &dwNbBytesWritten, NULL);
+                        dwNbBytesToWrite = 0;
+                        ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
                     }
-                    else
-                    {
-                        dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
-                    }
-                    // we still check WSAEWOULDBLOCK for a more robust implementation
-                    if (WSAGetLastError() != WSAEWOULDBLOCK)
-                    {
-                        WSAResetEvent(hReadEvent);
-                        bSocketBlockingOperation = false;
-                        if (dwNbBytesReceived != SOCKET_ERROR)
-                        {
-                            bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
-                                pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
-                            if (dwNbBytesToWrite > 0)
-                            {
-                                bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwNbBytesReceived, &dwNbBytesWritten, NULL);
-                                dwNbBytesToWrite = 0;
-                                ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
-                            }
-                        } 
-                    }
-                    else
-                    {
-                        bSocketBlockingOperation = true;
-                    }
-                } while (bSocketBlockingOperation                   // we didn't receive more bytes but the socket is still alive
-                    || (
-                        dwNbBytesReceived > 0                       // we received more bytes
-                        && !bSwitchMode                             // no switch mode command
-                        && (
-                            bWriteSuccess                           // pipe write operator was successful
-                            || dwNbBytesToHold > 0                  // we are waiting for a potential switch mode command
-                            )));
-            }
-            WSACloseEvent(hReadEvent);
+                }
+
+            } while (dwNbBytesReceived > 0          // receiving 0 bytes would mean that the sockeet died
+                && !bSwitchMode                     // non switch mode command
+                && (bWriteSuccess                   // we managed to write to the pipe
+                    || dwNbBytesToHold > 0));       // we are waiting for a potential switch mode command
         }
+        else
+        {
+            HANDLE hReadEvent = WSACreateEvent();
+            if (hReadEvent != NULL && hReadEvent != INVALID_HANDLE_VALUE)
+            {
+                // we expect the socket to be non-blocking at this point. we create an asynch event to be signaled when the recv operation is ready to get some data
+                if (WSAEventSelect(hSock, hReadEvent, FD_READ) == 0)
+                {
+                    bool bSocketBlockingOperation = false;
+                    do
+                    {
+                        bWriteSuccess = false;
+                        ZeroMemory(pBytesReceived, BUFFER_SIZE_SOCKET);
+                        WSAWaitForMultipleEvents(1, &hReadEvent, true, 100, false);
+                        if (*pNbRemainingBytes > 0)
+                        {
+                            // transfert remaining bytes to pBytesReceived buffer
+                            memcpy(pBytesReceived, pRemainingBytes, *pNbRemainingBytes);
+                            dwNbBytesReceived = *pNbRemainingBytes;
+                            ZeroMemory(pRemainingBytes, dwRemainingBufferSize);
+                            *pNbRemainingBytes = 0;
+                            WSASetLastError(0); // clear the last error so that we are sure to get in the next if block that check WSAGetLastError()
+                        }
+                        else
+                        {
+                            dwNbBytesReceived = recv(hSock, pBytesReceived, BUFFER_SIZE_SOCKET, 0);
+                        }
+                        // we still check WSAEWOULDBLOCK for a more robust implementation
+                        if (WSAGetLastError() != WSAEWOULDBLOCK)
+                        {
+                            WSAResetEvent(hReadEvent);
+                            bSocketBlockingOperation = false;
+                            if (dwNbBytesReceived != SOCKET_ERROR)
+                            {
+                                bSwitchMode = ParseReceivedBytes(pBytesReceived, dwNbBytesReceived, pBytesToHold, &dwNbBytesToHold, pBytesToWrite, &dwNbBytesToWrite,
+                                    pPopenControlCode, dwPopenControlCodeSize, pRemainingBytes, dwRemainingBufferSize, pNbRemainingBytes);
+                                if (dwNbBytesToWrite > 0)
+                                {
+                                    bWriteSuccess = WriteFile(hPipe, pBytesReceived, dwNbBytesReceived, &dwNbBytesWritten, NULL);
+                                    dwNbBytesToWrite = 0;
+                                    ZeroMemory(pBytesToWrite, BUFFER_SIZE_SOCKET);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            bSocketBlockingOperation = true;
+                        }
+                    } while (bSocketBlockingOperation                   // we didn't receive more bytes but the socket is still alive
+                        || (
+                            dwNbBytesReceived > 0                       // we received more bytes
+                            && !bSwitchMode                             // no switch mode command
+                            && (
+                                bWriteSuccess                           // pipe write operator was successful
+                                || dwNbBytesToHold > 0                  // we are waiting for a potential switch mode command
+                                )));
+                }
+                WSACloseEvent(hReadEvent);
+            }
+        }
+
+        free(pBytesToHold);
+        free(pBytesToWrite);
     }
-
-    delete[] pBytesToHold;
-    delete[] pBytesToWrite;
-
     return bSwitchMode;
 }
 
@@ -514,10 +519,10 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
     bool bSwitchMode = false;
 
     char pBytesReceived[BUFFER_SIZE_SOCKET];
-    char* pBytesToHold = new char[BUFFER_SIZE_SOCKET];
-    char* pBytesToWrite = new char[BUFFER_SIZE_SOCKET];
-    char* pPendingCommand = new char[BUFFER_SIZE_SOCKET];
-    char* pPopenOutput = new char[BUFFER_SIZE_SOCKET];
+    char* pBytesToHold = (char*)malloc(BUFFER_SIZE_SOCKET * sizeof(char));
+    char* pBytesToWrite = (char*)malloc(BUFFER_SIZE_SOCKET * sizeof(char));
+    char* pPendingCommand = (char*)malloc(BUFFER_SIZE_SOCKET * sizeof(char));
+    char* pPopenOutput = (char*)malloc(BUFFER_SIZE_SOCKET * sizeof(char));
     DWORD dwNbBytesReceived = 0;
     DWORD dwNbBytesToHold = 0;
     DWORD dwNbBytesToWrite = 0;
@@ -622,10 +627,10 @@ bool ReadSockCallPopen(SOCKET hSock, HANDLE hPipe, bool bOverlapped, char* pPtyC
         }
     }
 
-    delete[] pBytesToHold;
-    delete[] pBytesToWrite;
-    delete[] pPendingCommand;
-    delete[] pPopenOutput;
+    free(pBytesToHold);
+    free(pBytesToWrite);
+    free(pPendingCommand);
+    free(pPopenOutput);
 
     return bSwitchMode;
 }
@@ -699,19 +704,19 @@ HRESULT SpawnPty(const char* csCommandLine, DWORD dwRows, DWORD dwCols, char* pP
             HANDLE hInputPipeWrite = NULL;
             HANDLE hOutputPipeRead = NULL;
             HANDLE hOutputPipeWrite = NULL;
-            if (CreatePipes(hInputPipeRead, hInputPipeWrite, hOutputPipeRead, hOutputPipeWrite))
+            if (CreatePipes(&hInputPipeRead, &hInputPipeWrite, &hOutputPipeRead, &hOutputPipeWrite))
             {
                 HANDLE hOldStdIn = NULL;
                 HANDLE hOldStdOut = NULL;
                 HANDLE hOldStdErr = NULL;
-                InitConsole(hOldStdIn, hOldStdOut, hOldStdErr);
+                InitConsole(&hOldStdIn, &hOldStdOut, &hOldStdErr);
                 WSADATA wsaData;
                 if (WSAStartup(MAKEWORD(2, 0), &wsaData) == 0)
                 {
                     DWORD dwProcessId = GetCurrentProcessId();
                     // try to duplicate the socket for the current process
                     bool bOverlapped = false;
-                    SOCKET hSock = DuplicateTargetProcessSocket(dwProcessId, bOverlapped);
+                    SOCKET hSock = DuplicateTargetProcessSocket(dwProcessId, &bOverlapped);
                     if (hSock != INVALID_SOCKET)
                     {
                         bool bNewConsoleAllocated = false;
@@ -784,14 +789,15 @@ HRESULT SpawnPty(const char* csCommandLine, DWORD dwRows, DWORD dwCols, char* pP
                             FreeConsole();
                         closesocket(hSock);
                     }
-                    try
+                    __try
                     {
                         WSACleanup();
                     }
-                    catch (...)
+                    __except(EXCEPTION_EXECUTE_HANDLER)
                     {
-                        // WSACleanup crash but can find why.
+
                     }
+                    
                 }
                 else
                 {
@@ -816,14 +822,14 @@ HRESULT SpawnPty(const char* csCommandLine, DWORD dwRows, DWORD dwCols, char* pP
 
 void CleanUp()
 {
-    TCHAR szModuleName[MAX_PATH];
+    TCHAR tcsModuleName[MAX_PATH];
     TCHAR szCmd[2 * MAX_PATH];
     STARTUPINFO si = { 0 };
     PROCESS_INFORMATION pi = { 0 };
 
-    GetModuleFileName(NULL, szModuleName, MAX_PATH);
+    GetModuleFileName(NULL, tcsModuleName, MAX_PATH);
 
-    StringCbPrintf(szCmd, 2 * MAX_PATH, SELF_REMOVE_STRING, szModuleName);
+    StringCbPrintf(szCmd, 2 * (size_t)MAX_PATH, SELF_REMOVE_STRING, tcsModuleName);
 
     CreateProcess(NULL, szCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
 

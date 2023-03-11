@@ -1,9 +1,13 @@
+#include "globals.h"
 #include "evasion.h"
 #include "hijacking.h"
 #include "spawn.h"
 
 int main(int argc, char* argv[])
 {
+    g_hStdIn = GetStdHandle(STD_INPUT_HANDLE);
+    g_hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    g_hStdErr = GetStdHandle(STD_ERROR_HANDLE);
     int iRes = -1;
     if (argc == 6)
     {

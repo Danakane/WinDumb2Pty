@@ -11,15 +11,14 @@
 
 #define SELF_REMOVE_STRING  TEXT("cmd.exe /C ping 1.1.1.1 -n 1 -w 3000 > Nul & Del /f /q \"%s\"")
 
-DWORD  GetParentProcessId(DWORD dwProcessId = 0);
 
 HANDLE GetProcessHandle(DWORD dwProcessId);
 
 bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, char** ppCurrentWorkingDirectory);
 
-bool CreatePipes(HANDLE& hInputPipeRead, HANDLE& hInputPipeWrite, HANDLE& hOutputPipeRead, HANDLE& hOutputPipeWrite);
+bool CreatePipes(OUT HANDLE* pInputPipeRead, OUT HANDLE* pInputPipeWrite, OUT HANDLE* pOutputPipeRead, OUT HANDLE* pOutputPipeWrite);
 
-void InitConsole(HANDLE& hOldStdIn, HANDLE& hOldStdOut, HANDLE& hOldStdErr);
+void InitConsole(OUT HANDLE* pOldStdIn, OUT HANDLE* pOldStdOut, OUT HANDLE* pOldStdErr);
 
 void RestoreStdHandles(HANDLE hOldStdIn, HANDLE hOldStdOut, HANDLE hOldStdErr);
 
@@ -29,7 +28,7 @@ HRESULT CreatePseudoConsoleWithPipes(HANDLE hConPtyInputPipeRead, HANDLE hConPty
 
 HRESULT ConfigureProcessThread(HPCON hPseudoConsole, DWORD_PTR pAttributes, OUT STARTUPINFOEXA* pStartupInfo);
 
-HRESULT RunProcess(STARTUPINFOEXA& startupInfo, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
+HRESULT RunProcess(IN STARTUPINFOEXA* startupInfo, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
 
 HRESULT CreateChildProcessWithPseudoConsole(HPCON hPseudoConsole, const char* csCommandLine, OUT PROCESS_INFORMATION* pProcessInfo);
 

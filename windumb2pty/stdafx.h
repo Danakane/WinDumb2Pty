@@ -1,6 +1,7 @@
 #ifndef _STDAFX_H_
 #define _STDAFX_H_
 
+#define IN
 #define OUT
 #define WIN32_LEAN_AND_MEAN
 
@@ -12,20 +13,19 @@
 
 #include <fcntl.h>
 #include <io.h>
-#include <cstdio>
-#include <cstring>
+#include <stdlib.h>
 
 #include <winsock2.h>
 #include <WS2tcpip.h>
 #include <mstcpip.h>
 #include <strsafe.h>
 
-#include <cassert>
-#include <list>
-#include <vector>
 
-using namespace std;
 
+#define false 0
+#define true 1
+
+typedef BOOL bool;
 
 
 #endif

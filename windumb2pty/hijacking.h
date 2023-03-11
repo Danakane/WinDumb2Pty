@@ -4,24 +4,20 @@
 #include "stdafx.h"
 #include "wininternal.h"
 
-typedef list<HANDLE> HANDLE_LIST;
-typedef list<SOCKET> SOCKET_LIST;
-
-
-struct THREAD_PARAMS
+typedef struct _THREAD_PARAMS
 {
     PSYSTEM_HANDLE_INFORMATION pSysHandleInformation;
     DWORD dwProcessId;
     HANDLE hStartEvent;
     HANDLE hFinishedEvent;
     bool bStatus;
-};
+} THREAD_PARAMS;
 
-struct SOCKET_BYTESIN
+typedef struct _SOCKET_BYTESIN
 {
     SOCKET sock;
     UINT64 bytes_in;
-};
+} SOCKET_BYTESIN;
 
 enum SOCKET_STATE
 {
@@ -39,9 +35,10 @@ enum AFD_GROUP_TYPE
     GroupTypeUnconstrained = SG_UNCONSTRAINED_GROUP
 };
 
-struct SOCK_SHARED_INFO
+
+typedef struct _SOCK_SHARED_INFO
 {
-    SOCKET_STATE state;
+    enum SOCKET_STATE state;
     INT AddressFamily;
     INT SocketType;
     INT Protocol;
@@ -49,7 +46,7 @@ struct SOCK_SHARED_INFO
     INT RemoteAddressLength;
 
     // Socket options controlled by getsockopt(), setsockopt().
-    linger LingerInfo;
+    struct linger LingerInfo;
     UINT SendTimeout;
     UINT ReceiveTimeout;
     UINT ReceiveBufferSize;
@@ -74,7 +71,7 @@ struct SOCK_SHARED_INFO
     UINT ServiceFlags1;
     UINT ProviderFlags;
     UINT GroupID;
-    AFD_GROUP_TYPE GroupType;
+    enum AFD_GROUP_TYPE GroupType;
     INT GroupPriority;
     // Last error set on this socket
     INT LastError;
@@ -84,9 +81,9 @@ struct SOCK_SHARED_INFO
     UINT AsyncSelectwMsg;
     UINT AsyncSelectlEvent;
     UINT DisabledAsyncSelectEvents;
-};
+} SOCK_SHARED_INFO;
 
-struct SOCKET_CONTEXT
+typedef struct _SOCKET_CONTEXT
 {
     SOCK_SHARED_INFO SharedData;
     UINT SizeOfHelperData;
@@ -95,26 +92,53 @@ struct SOCKET_CONTEXT
     SOCKADDR RemoteAddress;
     // Helper Data - found out with some reversing
     BYTE HelperData[24];
-};
+} SOCKET_CONTEXT;
 
 
 bool IsSocketHandle(HANDLE hHandle);
 
 bool GetSocketTcpInfo(SOCKET hSock, TCP_INFO_v0** tcpInfoOut);
 
-SOCKET_LIST FilterAndOrderSocketsByBytesIn(SOCKET_LIST& lstSocks);
+typedef struct _HANDLE_NODE
+{
+    HANDLE hHandle;
+    struct _HANDLE_NODE* pNext;
+} HANDLE_NODE;
 
-SOCKET_LIST GetTargetProcessSockets(DWORD dwProcessId);
+typedef struct _HANDLE_LIST
+{
+    HANDLE_NODE* pHead;
+    HANDLE_NODE* pTail;
+    DWORD dwLength;
+} HANDLE_LIST;
+
+typedef struct _SOCKET_NODE
+{
+    SOCKET hSock;
+    struct _SOCKET_NODE* pNext;
+} SOCKET_NODE;
+
+typedef struct _SOCKET_LIST
+{
+    SOCKET_NODE* pHead;
+    SOCKET_NODE* pTail;
+    DWORD dwLength;
+} SOCKET_LIST;
+
+int compare_sockets(const void* a, const void* b);
+
+SOCKET_LIST* FilterAndOrderSocketsByBytesIn(SOCKET_LIST* pDupSocks);
+
+SOCKET_LIST* GetTargetProcessSockets(DWORD dwProcessId);
 
 bool IsSocketOverlapped(SOCKET sock);
 
 SOCKET DuplicateSocketFromHandle(HANDLE hHandle);
-
-SOCKET_LIST DuplicateSocketsFromHandles(HANDLE_LIST& lstHandles);
+SOCKET_LIST* DuplicateSocketsFromHandles(HANDLE_LIST* pHandles);
 
 DWORD WINAPI ThreadProc(LPVOID lParams);
 
-SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool& bOverlappedSocket);
+SOCKET DuplicateTargetProcessSocket(DWORD dwProcessId, bool* pOverlappedSocket);
 
 bool SetSocketBlockingMode(SOCKET hSock, int iMode);
 

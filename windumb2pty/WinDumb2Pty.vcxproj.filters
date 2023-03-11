@@ -15,19 +15,19 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
+    <ClCompile Include="main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="hijacking.cpp">
+    <ClCompile Include="hijacking.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="evasion.cpp">
+    <ClCompile Include="evasion.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="spawn.cpp">
+    <ClCompile Include="spawn.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="globals.cpp">
+    <ClCompile Include="globals.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
