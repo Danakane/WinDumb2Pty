@@ -79,9 +79,16 @@ bool GetProcessCwd(HANDLE hReadPipe, HANDLE hWritePipe, char** ppCurrentWorkingD
                         if (pEnd != NULL)
                         {
                             size_t length = pEnd - pStart;
+                            int i = 0;
+                            for (i = 0; i < length; ++i)
+                            {
+                                if (*(pStart + i) == '\x1b') // trim any data beyond if we encounter ansi escape sequence leading byte
+                                    break;
+                            }
+                            if(i < length)
+                                length = i;
                             char* csCandidate = (char*)malloc((length + 1) * sizeof(char));
-                            ASSERT(csCandidate != NULL);
-                            if (csCandidate != NULL) // this is just to remove the warning
+                            if (csCandidate != NULL) 
                             {
                                 ZeroMemory(csCandidate, (length + 1) * sizeof(char));
                                 memcpy(csCandidate, pStart, length * sizeof(char));
